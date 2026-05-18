@@ -8,49 +8,46 @@
 
 ## Обзор архитектуры
 
-```text
-Backbone coords [B, L, 3, 3]
-        │
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│  BiophysicalFrontend          (frozen, no_grad)             │
-│                                                             │
-│  BackboneGeometry   FoldabilityProxies   PairFeatureBuilder │
-│  φ ψ ω · clashes   packing · burial ·   RBF16 · kNN16 ·   │
-│  H-bonds → 10 f.   PCA-frag  → 21 f.    seq-sep → 20 f.   │
-│                                                             │
-│  node feats [B,L,31]      pair feats [B,L,L,20] + kNN edges│
-└───────────────┬─────────────────────────┬───────────────────┘
-                │                         │
-                ▼                         │
-┌──────────────────────────────────────┐  │
-│  HybridProteinEncoder                │  │
-│                                      │  │
-│  PyGGraphMessageLayer ×2  ◄──────────┘  │
-│  (GRU-gate MPNN + grad-ckpt)            │
-│            │                            │
-│            ▼                            │
-│  TransformerEncoder ×4                  │
-│  Pre-LN · bfloat16 · d_model=192        │
-└───────────────┬──────────────────────┘
-                │  [B, L, 192]
-                ▼
-┌──────────────────────────────────────┐
-│  MultiHeadAttentionPooling  (H=4)    │
-│  softmax over L  →  [B, 192]         │
-└───────────────┬──────────────────────┘
-                │
-                ▼
-┌──────────────────────────────────────┐
-│  ProteinMultiTaskHeads               │
-│                                      │
-│  fold_logit  rmsd  steric  hbond     │
-│  failure_mode (4-class)              │
-└───────────────┬──────────────────────┘
-                │
-                ▼
-   DynamicMultiTaskLoss (Kendall & Gal 2018)
-   Σ 0.5·exp(−sᵢ)·Lᵢ + 0.5·sᵢ   (sᵢ learnable)
+```mermaid
+flowchart TD
+    INPUT["<b>Backbone coords</b><br/>[B, L, 3, 3]"]
+
+    subgraph FRONTEND["BiophysicalFrontend · frozen / no_grad"]
+        GEO["BackboneGeometry<br/>φ ψ ω · clashes · H-bonds<br/>→ 10 признаков"]
+        FOLD["FoldabilityProxies<br/>packing · burial · PCA-frag<br/>→ 21 признак"]
+        PAIR["PairFeatureBuilder<br/>RBF-16 · kNN-16 · seq-sep<br/>→ 20 признаков"]
+    end
+
+    NODE["node feats · [B, L, 31]"]
+    PAIR_FEATS["pair feats · [B, L, L, 20] + kNN edges"]
+
+    subgraph ENCODER["HybridProteinEncoder"]
+        MPNN["PyGGraphMessageLayer × 2<br/>GRU-gate MPNN + grad-ckpt"]
+        TRANSFORMER["TransformerEncoder × 4<br/>Pre-LN · bfloat16 · d_model = 192"]
+    end
+
+    POOL["MultiHeadAttentionPooling · H = 4<br/>softmax over L → [B, 192]"]
+
+    subgraph HEADS["ProteinMultiTaskHeads"]
+        H1["fold_logit"] 
+        H2["rmsd"]
+        H3["steric"]
+        H4["hbond"]
+        H5["failure_mode<br/>(4 класса)"]
+    end
+
+    LOSS["DynamicMultiTaskLoss · Kendall & Gal 2018<br/>∑ ½·exp(−sᵢ)·Lᵢ + ½·sᵢ   (sᵢ learnable)"]
+
+    INPUT --> FRONTEND
+    GEO --> NODE
+    FOLD --> NODE
+    PAIR --> PAIR_FEATS
+    NODE --> MPNN
+    PAIR_FEATS --> MPNN
+    MPNN --> TRANSFORMER
+    TRANSFORMER --> POOL
+    POOL --> HEADS
+    HEADS --> LOSS
 ```
 
 Фронтенд вычисляет физически осмысленные признаки **один раз** и кеширует их.
@@ -115,7 +112,7 @@ pip install torch torchvision torch-geometric biotite scipy pandas h5py tensorbo
 
 ---
 
-## ⚙️ Пошаговый запуск пайплайна данных
+## Пошаговый запуск пайплайна данных
 
 Для подготовки сбалансированного датасета выполните последовательно следующие модули.
 
@@ -164,7 +161,7 @@ python make_split.py
 
 ---
 
-## 🧪 Многоуровневый негативный сэмплинг (Decoy Strategies)
+## Многоуровневый негативный сэмплинг (Decoy Strategies)
 
 Модель обучается распознавать дефекты различной степени выраженности благодаря диверсифицированной генерации:
 
@@ -181,17 +178,10 @@ python make_split.py
 
 ---
 
-## 🧮 Функция потерь: Homoscedastic Task Uncertainty
+## Функция потерь: Homoscedastic Task Uncertainty
 
 Поскольку модель оптимизирует гетерогенные задачи (бинарная классификация, регрессия углов/расстояний в логарифмических шкалах и многоклассовое разделение), ручной подбор весов лоссов неэффективен.
-Реализован адаптивный лосс по методу Kendall & Gal (2018):
-
-\[
-L_{\text{total}} = \sum_{i=1}^{5} \left( \frac{1}{2} e^{-s_i} L_i + \frac{1}{2} s_i \right)
-\]
-
-где \(s_i \equiv \log \sigma_i^2\) — обучаемый моделью параметр неопределённости для каждой подзадачи.
-При росте шума в задаче \(i\) модель увеличивает \(s_i\), автоматически уменьшая вклад этой компоненты в градиент и предотвращая расхождение весов.
+Реализован адаптивный лосс по методу Kendall & Gal (2018)
 
 ---
 
