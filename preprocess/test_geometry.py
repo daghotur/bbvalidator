@@ -69,21 +69,23 @@ def _make_helix_coords(B: int, N: int, device: torch.device, noise: float = 0.05
     # Дальнейшие атомы по NeRF.
     # Для каждого следующего остатка i: ставим N(i), CA(i), C(i)
     # с торсионами psi(i-1), omega(i-1), phi(i) соответственно.
+    # ВАЖНО: bond_angle в _place_atom — это сам валентный угол при
+    # центральном атоме (конвенция NeRF), передавать нужно A_*, а не π − A_*.
     for i in range(1, N):
         a, b, c = atoms[-3], atoms[-2], atoms[-1]  # ... N(i-1), CA(i-1), C(i-1)
 
         # N(i): торсион psi(i-1) вокруг связи CA(i-1)-C(i-1), угол CA-C-N
-        N_i = _place_atom(a, b, c, L_C_N, math.pi - A_CA_C_N, PSI)
+        N_i = _place_atom(a, b, c, L_C_N, A_CA_C_N, PSI)
         atoms.append(N_i)
 
         # CA(i): торсион omega вокруг связи C(i-1)-N(i), угол C-N-CA
         a, b, c = atoms[-3], atoms[-2], atoms[-1]  # CA(i-1), C(i-1), N(i)
-        CA_i = _place_atom(a, b, c, L_N_CA, math.pi - A_C_N_CA, OMG)
+        CA_i = _place_atom(a, b, c, L_N_CA, A_C_N_CA, OMG)
         atoms.append(CA_i)
 
         # C(i): торсион phi(i) вокруг связи N(i)-CA(i), угол N-CA-C
         a, b, c = atoms[-3], atoms[-2], atoms[-1]  # C(i-1), N(i), CA(i)
-        C_i = _place_atom(a, b, c, L_CA_C, math.pi - A_N_CA_C, PHI)
+        C_i = _place_atom(a, b, c, L_CA_C, A_N_CA_C, PHI)
         atoms.append(C_i)
 
     # Собираем в [N, 3 (atoms N,CA,C), 3 (xyz)]
@@ -233,9 +235,9 @@ def test_ca_distances(extractor, device):
 
     valid_ca = feats["ca_dist"][feats["ca_mask"]]
     mean_dist = valid_ca.mean().item()
-    # Спираль с параметрами из _make_helix_coords: шаг ~3.5–4.5 Å
+    # Универсальная геометрия пептидной единицы: CA-CA всегда ~3.8 Å
     assert (
-            2.5 < mean_dist < 6.0
+            3.7 < mean_dist < 3.9
     ), f"Среднее расстояние CA-CA = {mean_dist:.2f} Å — за пределами ожидаемого"
     print(f"  [OK] CA-CA mean distance: {mean_dist:.3f} Å")
 
