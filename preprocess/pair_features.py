@@ -24,6 +24,29 @@ class PairFeatureBuilder(nn.Module):
         self.rbf = RBFExpansion(bins=rbf_bins)
         self.k_neighbors = k_neighbors
 
+    @property
+    def feature_dim(self) -> int:
+        # rbf(bins) + contact + seq_sep_norm + seq_adjacent + same_local_window
+        return self.rbf.bins + 4
+
+    def _edge_attr(
+        self,
+        dist_e: torch.Tensor,  # [E] — расстояния Cα–Cα для рёбер
+        src_global: torch.Tensor,  # [E] — глобальные seq-индексы источника
+        dst_global: torch.Tensor,  # [E] — глобальные seq-индексы приёмника
+    ) -> torch.Tensor:
+        rbf_e = self.rbf(dist_e)  # [E, bins]
+        contact = (dist_e < 8.0).float().unsqueeze(-1)
+
+        seq_sep = torch.abs(src_global - dst_global).float()
+        seq_sep_norm = torch.clamp(seq_sep / 32.0, 0.0, 1.0).unsqueeze(-1)
+        seq_adjacent = (seq_sep == 1).float().unsqueeze(-1)
+        same_local_window = (seq_sep <= 4).float().unsqueeze(-1)
+
+        return torch.cat(
+            [rbf_e, contact, seq_sep_norm, seq_adjacent, same_local_window], dim=-1
+        )  # [E, F_pair]
+
     def forward(
         self,
         ca_coords: torch.Tensor,
@@ -35,29 +58,12 @@ class PairFeatureBuilder(nn.Module):
         B, N, _ = ca_coords.shape
         device = ca_coords.device
 
-        # 1. Попарные расстояния
+        # 1. Попарные расстояния (нужны только для построения kNN-графа)
         if dist_mat is None:
             dist_mat = torch.cdist(ca_coords, ca_coords)
 
-        rbf_feats = self.rbf(dist_mat)  # [B, N, N, bins]
-
-        # 2. Признаки пар
-        contact_flag = (dist_mat < 8.0).float().unsqueeze(-1)
-
-        seq_idx = torch.arange(N, device=device)
-        seq_sep_raw = torch.abs(seq_idx.unsqueeze(0) - seq_idx.unsqueeze(1))
-        seq_sep_raw = seq_sep_raw.unsqueeze(0).expand(B, -1, -1)
-
-        seq_sep_norm = torch.clamp(seq_sep_raw.float() / 32.0, 0.0, 1.0).unsqueeze(-1)
-        seq_adjacent = (seq_sep_raw == 1).float().unsqueeze(-1)
-        same_local_window = (seq_sep_raw <= 4).float().unsqueeze(-1)
-
-        pair_feats = torch.cat(
-            [rbf_feats, contact_flag, seq_sep_norm, seq_adjacent, same_local_window],
-            dim=-1,
-        )  # [B, N, N, F_pair]
-
-        # 3. kNN-граф
+        # 2. kNN-граф. Признаки рёбер считаются напрямую для найденных рёбер,
+        #    без материализации плотного тензора [B, N, N, F_pair] (экономия O(N²)).
         k = min(self.k_neighbors, N - 1)
 
         pair_valid = mask.unsqueeze(2) & mask.unsqueeze(1)  # [B, N, N]
@@ -76,7 +82,9 @@ class PairFeatureBuilder(nn.Module):
                 edge_indices.append(
                     torch.zeros((2, 0), dtype=torch.long, device=device)
                 )
-                edge_attrs.append(torch.zeros((0, pair_feats.shape[-1]), device=device))
+                edge_attrs.append(
+                    torch.zeros((0, self.feature_dim), device=device)
+                )
                 continue
 
             # Глобальные позиции валидных узлов и отображение global → local
@@ -94,17 +102,17 @@ class PairFeatureBuilder(nn.Module):
             src_local = (
                 torch.arange(nb, device=device).unsqueeze(1).expand(nb, k)[is_real]
             )
-            dst_local = g2l[knn_b_idx[is_real]]
+            dst_global = knn_b_idx[is_real]  # [E]
+            dst_local = g2l[dst_global]
+            src_global = valid_pos[src_local]  # [E]
 
             edge_index = torch.stack([src_local, dst_local], dim=0)
-            # Признаки ребра: из плотной матрицы [nb, nb]
-            e_attr = pair_feats[b][valid][:, valid][src_local, dst_local]
+            e_attr = self._edge_attr(knn_b_vals[is_real], src_global, dst_global)
 
             edge_indices.append(edge_index)
             edge_attrs.append(e_attr)
 
         return {
-            "pair_feats": pair_feats,  # [B, N, N, F_pair] — для трансформера
             "edge_indices": edge_indices,  # List[Tensor(2, E)] — для графовых слоёв
             "edge_attrs": edge_attrs,  # List[Tensor(E, F_pair)]
         }

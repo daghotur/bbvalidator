@@ -30,7 +30,6 @@ class BiophysicalFrontend(nn.Module):
             fold_raw = self.foldability(ca, mask, dist_mat=dist_mat)
 
             # 2. Пары и граф
-            # 2. Пары и граф
             pair_data = self.pair_builder(
                 ca, mask, dist_mat=dist_mat
             )
@@ -43,7 +42,6 @@ class BiophysicalFrontend(nn.Module):
 
             return {
                 "node_feats": node_feats,  # [B, N, F_node]
-                "pair_feats": pair_data["pair_feats"],  # [B, N, N, F_pair]
                 "edge_indices": pair_data["edge_indices"],  # List[Tensor(2, E)]
                 "edge_attrs": pair_data["edge_attrs"],  # List[Tensor(E, F_pair)]
                 "mask": mask,
