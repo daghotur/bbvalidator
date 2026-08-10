@@ -88,4 +88,4 @@ edge_indices list([2, E_b]) # kNN-граф каждого образца, лок
 edge_attrs   list([E_b, 20])
 ```
 
-Далее эти тензоры потребляет энкодер — см. модуль [03](03-model-i-obuchenie.md). Реализация: `preprocess/geometry_features.py`, `preprocess/foldability_features.py`, `preprocess/pair_features.py`; корректность покрыта pytest-тестами (`preprocess/test_geometry.py`, `preprocess/test_foldability.py`), включая регрессионные тесты на синтетической $\alpha$-спирали, построенной через NeRF.
+Далее эти тензоры потребляет энкодер — см. модуль [03](03-model-i-obuchenie.md). Реализация: `preprocess/geometry_features.py`, `preprocess/designability_features.py`, `preprocess/pair_features.py`; корректность покрыта pytest-тестами (`preprocess/test_geometry.py`, `preprocess/test_designability.py`), включая регрессионные тесты на синтетической $\alpha$-спирали, построенной через NeRF.

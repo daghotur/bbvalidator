@@ -7,7 +7,7 @@ flowchart TD
     INPUT["coords [B, L, 3, 3] + mask"]
     subgraph FRONTEND["BiophysicalFrontend · no_grad · заморожен"]
         GEO["BackboneGeometry<br/>торсионы · Рамачандран · клэши · H-связи<br/>→ 10 признаков"]
-        FOLD["FoldabilityProxies<br/>упаковка · экспонированность · PCA-frag<br/>→ 21 признак"]
+        FOLD["DesignabilityProxies<br/>упаковка · экспонированность · PCA-frag<br/>→ 21 признак"]
         PAIR["PairFeatureBuilder<br/>RBF-16 · kNN-16 · seq-sep<br/>→ 20 признаков"]
     end
     NODE["node_feats [B, L, 31]"]

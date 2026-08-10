@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Optional
 
 
-class FoldabilityProxies(nn.Module):
+class DesignabilityProxies(nn.Module):
     def __init__(
         self,
         contact_threshold: float = 8.0,

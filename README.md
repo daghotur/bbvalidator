@@ -16,7 +16,7 @@ flowchart TD
 
     subgraph FRONTEND["BiophysicalFrontend · frozen / no_grad"]
         GEO["BackboneGeometry<br/>φ ψ ω · clashes · H-bonds<br/>→ 10 признаков"]
-        FOLD["FoldabilityProxies<br/>packing · burial · PCA-frag<br/>→ 21 признак"]
+        FOLD["DesignabilityProxies<br/>packing · burial · PCA-frag<br/>→ 21 признак"]
         PAIR["PairFeatureBuilder<br/>RBF-16 · kNN-16 · seq-sep<br/>→ 20 признаков"]
     end
 
@@ -83,11 +83,11 @@ flowchart TD
 ├── preprocess/
 │   ├── biophys_frontend.py         # Оркестратор извлечения признаков
 │   ├── geometry_features.py        # Торсионы, виртуальные Cβ/O, клэши, H-связи
-│   ├── foldability_features.py     # Упаковка, экспонированность, PCA фрагментов
+│   ├── designability_features.py     # Упаковка, экспонированность, PCA фрагментов
 │   ├── pair_features.py            # Парные признаки и kNN-граф
 │   ├── fit_pca.py                  # Fit PCA по нативным структурам
 │   ├── test_geometry.py            # Тесты геометрии (pytest)
-│   ├── test_foldability.py         # Тесты foldability-признаков (pytest)
+│   ├── test_designability.py         # Тесты designability-признаков (pytest)
 │   └── conftest.py                 # pytest-фикстуры
 │
 ├── model/

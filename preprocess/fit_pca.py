@@ -27,7 +27,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .foldability_features import FoldabilityProxies
+from .designability_features import DesignabilityProxies
 
 FRAGMENT_SIZE = 9
 FRAG_PAIRS = (FRAGMENT_SIZE * (FRAGMENT_SIZE - 1)) // 2  # 36
@@ -36,7 +36,7 @@ PAD = FRAGMENT_SIZE // 2  # 4 позиции с каждого края — repl
 
 @torch.no_grad()
 def _iter_fragment_distances(
-    h5_path: str, proxy: FoldabilityProxies, device: torch.device
+    h5_path: str, proxy: DesignabilityProxies, device: torch.device
 ):
     """Генератор тензоров [M, 36] — расстояния настоящих (не паддинговых) фрагментов."""
     with h5py.File(h5_path, "r") as h5f:
@@ -61,7 +61,7 @@ def fit_pca(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    proxy = FoldabilityProxies(
+    proxy = DesignabilityProxies(
         pca_components=pca_components, fragment_size=FRAGMENT_SIZE
     ).to(device)
 
@@ -110,17 +110,17 @@ def load_pca_into_frontend(frontend, pca_path: str) -> None:
         )
     state = torch.load(pca_path, map_location="cpu", weights_only=True)
 
-    foldability = frontend.foldability
+    designability = frontend.designability
     components = state["components"]
-    if components.shape != foldability.pca_proj.weight.shape:
+    if components.shape != designability.pca_proj.weight.shape:
         raise ValueError(
             f"Форма PCA-весов {tuple(components.shape)} не совпадает с "
-            f"ожидаемой {tuple(foldability.pca_proj.weight.shape)}"
+            f"ожидаемой {tuple(designability.pca_proj.weight.shape)}"
         )
 
-    foldability.pca_proj.weight.data.copy_(components)
-    foldability.frag_mean.data.copy_(state["frag_mean"])
-    foldability.freeze_pca()
+    designability.pca_proj.weight.data.copy_(components)
+    designability.frag_mean.data.copy_(state["frag_mean"])
+    designability.freeze_pca()
 
 
 def main() -> None:

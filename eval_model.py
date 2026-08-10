@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from baselines.train_baseline import build_baseline
 from dataset.dataloader import make_loader
-from inference import _autocast_ctx, build_model
+from inference import _autocast_ctx, build_model, remap_legacy_foldability_keys
 from model.metrics import average_precision_score, expected_calibration_error, roc_auc_score
 from preprocess.fit_pca import load_pca_into_frontend
 
@@ -41,6 +41,7 @@ def build_eval_model(ckpt_path: str, device: torch.device, pca_path: str):
     """
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
+    state_dict = remap_legacy_foldability_keys(state_dict)
 
     if any(k.startswith("encoder.net.") for k in state_dict):
         arch = "mlp"

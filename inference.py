@@ -64,6 +64,14 @@ def parse_pdb_to_backbone(pdb_path: str) -> np.ndarray:
     return coords
 
 
+def remap_legacy_foldability_keys(state_dict: dict) -> dict:
+    """Чекпоинты до переименования foldability → designability: правим ключи."""
+    return {
+        k.replace("foldability", "designability"): v
+        for k, v in state_dict.items()
+    }
+
+
 def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dataset/pca_components.pth") -> ProteinScoreModel:
     d_model = 192
     frontend = BiophysicalFrontend(use_no_grad=True)
@@ -89,6 +97,7 @@ def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dat
 
     # Обработка ключа model_state_dict (как мы сохраняли в train_model.py)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
+    state_dict = remap_legacy_foldability_keys(state_dict)
     try:
         model.load_state_dict(state_dict)
     except RuntimeError as e:

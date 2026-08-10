@@ -4,7 +4,7 @@ import contextlib
 from typing import Dict
 
 from .geometry_features import BackboneGeometryExtractor
-from .foldability_features import FoldabilityProxies
+from .designability_features import DesignabilityProxies
 from .pair_features import PairFeatureBuilder
 
 
@@ -12,7 +12,7 @@ class BiophysicalFrontend(nn.Module):
     def __init__(self, use_no_grad: bool = True):
         super().__init__()
         self.geometry = BackboneGeometryExtractor()
-        self.foldability = FoldabilityProxies(pca_components=16)
+        self.designability = DesignabilityProxies(pca_components=16)
         self.pair_builder = PairFeatureBuilder(rbf_bins=16, k_neighbors=16)
         self.use_no_grad = use_no_grad
 
@@ -27,7 +27,7 @@ class BiophysicalFrontend(nn.Module):
 
             # 1. Сырые признаки
             geom_raw = self.geometry(coords, mask)
-            fold_raw = self.foldability(ca, mask, dist_mat=dist_mat)
+            fold_raw = self.designability(ca, mask, dist_mat=dist_mat)
 
             # 2. Пары и граф
             pair_data = self.pair_builder(
@@ -36,7 +36,7 @@ class BiophysicalFrontend(nn.Module):
 
             # 3. Узловые признаки
             geom_x = self.geometry.pack_for_mlp(geom_raw)  # [B, N, 10]
-            fold_x = self.foldability.pack_for_mlp(fold_raw)  # [B, N, 21]
+            fold_x = self.designability.pack_for_mlp(fold_raw)  # [B, N, 21]
 
             node_feats = torch.cat([geom_x, fold_x], dim=-1)  # [B, N, 31]
 

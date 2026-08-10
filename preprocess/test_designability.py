@@ -1,6 +1,6 @@
 import time
 import torch
-from preprocess.foldability_features import FoldabilityProxies
+from preprocess.designability_features import DesignabilityProxies
 
 
 # ---------------------------------------------------------------------------
@@ -18,8 +18,8 @@ def _make_random_walk(B: int, N: int, device: torch.device, seed: int = 42):
     return coords
 
 
-def _make_proxy(device: torch.device, **kwargs) -> FoldabilityProxies:
-    return FoldabilityProxies(
+def _make_proxy(device: torch.device, **kwargs) -> DesignabilityProxies:
+    return DesignabilityProxies(
         contact_threshold=8.0, seq_sep=3, pca_components=16, fragment_size=9, **kwargs
     ).to(device)
 
@@ -196,7 +196,7 @@ def benchmark(proxy, device, B: int = 4096, N: int = 200, reps: int = 10):
     with torch.inference_mode():
         for _ in range(reps):
             feats  = proxy(coords, mask)
-            packed = FoldabilityProxies.pack_for_mlp(feats)
+            packed = DesignabilityProxies.pack_for_mlp(feats)
 
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -222,7 +222,7 @@ def run_all():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     proxy  = _make_proxy(device)
 
-    print(f"\n=== FoldabilityProxies | device={device} ===\n")
+    print(f"\n=== DesignabilityProxies | device={device} ===\n")
 
     test_output_shapes(proxy, device)
     test_local_bending_boundaries(proxy, device)

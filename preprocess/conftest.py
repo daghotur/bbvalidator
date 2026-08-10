@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from preprocess.foldability_features import FoldabilityProxies
+from preprocess.designability_features import DesignabilityProxies
 from preprocess.geometry_features import BackboneGeometryExtractor
 
 
@@ -18,6 +18,6 @@ def extractor(device):
 
 @pytest.fixture
 def proxy(device):
-    return FoldabilityProxies(
+    return DesignabilityProxies(
         contact_threshold=8.0, seq_sep=3, pca_components=16, fragment_size=9
     ).to(device)
