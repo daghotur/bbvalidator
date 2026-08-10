@@ -7,9 +7,8 @@ import biotite.structure.io.pdb as pdb
 import contextlib
 import warnings
 
-warnings.filterwarnings("ignore", message=".*elements were guessed from atom name.*")
-
 from preprocess.biophys_frontend import BiophysicalFrontend
+from preprocess.fit_pca import load_pca_into_frontend
 from model.encoder import HybridProteinEncoder
 from model.heads_loss import (
     MultiHeadAttentionPooling,
@@ -17,6 +16,8 @@ from model.heads_loss import (
     ProteinScoreModel,
     predict_with_uncertainty
 )
+
+warnings.filterwarnings("ignore", message=".*elements were guessed from atom name.*")
 
 
 def center_coords(coords: np.ndarray) -> np.ndarray:
@@ -63,7 +64,7 @@ def parse_pdb_to_backbone(pdb_path: str) -> np.ndarray:
     return coords
 
 
-def build_model(checkpoint_path: str, device: torch.device) -> ProteinScoreModel:
+def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dataset/pca_components.pth") -> ProteinScoreModel:
     d_model = 192
     frontend = BiophysicalFrontend(use_no_grad=True)
     encoder = HybridProteinEncoder(
@@ -82,15 +83,38 @@ def build_model(checkpoint_path: str, device: torch.device) -> ProteinScoreModel
     model = ProteinScoreModel(frontend, encoder, pooler, heads)
 
     print(f"Загрузка весов из {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # weights_only=True защищает от исполнения произвольного кода при загрузке
+    # недоверенного .pth (pickle RCE). Чекпоинт содержит только тензоры и скаляры.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
     # Обработка ключа model_state_dict (как мы сохраняли в train_model.py)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError as e:
+        raise RuntimeError(
+            "Чекпоинт несовместим с текущей архитектурой. Чекпоинты до "
+            "пересборки 2026-08 не подойдут: убрана hbond-голова, добавлен "
+            "PCA-буфер frag_mean. Переобучите модель (train_model.py)."
+        ) from e
+
+    # PCA фронтенда: чекпоинт уже содержит фит-веса, но файл применяем
+    # повторно, чтобы гарантировать согласованность и заморозку.
+    if os.path.exists(pca_path):
+        load_pca_into_frontend(model.frontend, pca_path)
+    else:
+        print(f"ВНИМАНИЕ: {pca_path} не найден — используются PCA-веса из чекпоинта.")
 
     model.to(device)
     model.eval()
     return model
+
+
+def _autocast_ctx(device: torch.device):
+    """bfloat16-автокаст на CUDA, иначе — no-op (CPU не выигрывает от bf16)."""
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
 def process_single_pdb(pdb_path: str, model: ProteinScoreModel, device: torch.device, mc_runs: int):
@@ -104,17 +128,15 @@ def process_single_pdb(pdb_path: str, model: ProteinScoreModel, device: torch.de
         coords_ts = torch.from_numpy(coords_np).unsqueeze(0).to(device)
         mask_ts = torch.ones((1, length), dtype=torch.bool, device=device)
 
-        # 3. MC-Dropout Инференс
-        with torch.autocast(device_type=device.type,
-                            dtype=torch.bfloat16) if device.type == 'cuda' else torch.no_grad():
+        # 3. MC-Dropout Инференс (predict_with_uncertainty уже под @torch.no_grad)
+        with _autocast_ctx(device):
             results = predict_with_uncertainty(model, coords_ts, mask_ts, mc_runs=mc_runs)
 
         p_foldable = results["p_foldable"].item()
         uncertainty = results["uncertainty"].item()
 
         # Оценка дополнительных голов (просто один проход для логов)
-        with torch.no_grad(), torch.autocast(device_type=device.type,
-                                             dtype=torch.bfloat16) if device.type == 'cuda' else contextlib.nullcontext():
+        with torch.no_grad(), _autocast_ctx(device):
             single_preds = model(coords_ts, mask_ts)
             rmsd_pred = torch.expm1(single_preds["rmsd"]).item()
             rmsd_pred = max(0.0, rmsd_pred)

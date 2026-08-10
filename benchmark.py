@@ -3,7 +3,7 @@ import time
 import torch
 import numpy as np
 import warnings
-from inference import build_model, parse_pdb_to_backbone, center_coords
+from inference import build_model, parse_pdb_to_backbone, center_coords, _autocast_ctx
 from model.heads_loss import predict_with_uncertainty
 
 warnings.filterwarnings("ignore", message=".*elements were guessed from atom name.*")
@@ -22,8 +22,7 @@ def benchmark_model(pdb_path: str, ckpt_path: str, mc_runs: int, iterations: int
 
     print(f"Прогрев 5 итераций...")
     for _ in range(5):
-        with torch.autocast(device_type=device.type,
-                            dtype=torch.bfloat16) if device.type == 'cuda' else torch.no_grad():
+        with _autocast_ctx(device):
             _ = predict_with_uncertainty(model, coords_ts, mask_ts, mc_runs=mc_runs)
 
     if device.type == 'cuda':
@@ -38,8 +37,7 @@ def benchmark_model(pdb_path: str, ckpt_path: str, mc_runs: int, iterations: int
             torch.cuda.synchronize()
         start_time = time.perf_counter()
 
-        with torch.autocast(device_type=device.type,
-                            dtype=torch.bfloat16) if device.type == 'cuda' else torch.no_grad():
+        with _autocast_ctx(device):
             _ = predict_with_uncertainty(model, coords_ts, mask_ts, mc_runs=mc_runs)
 
         if device.type == 'cuda':
