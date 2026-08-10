@@ -24,6 +24,10 @@ dataset/latest/
 # Downloaded external datasets (MotifBench outputs and evaluations)
 data/ood/
 
+# Generated dataset manifests (reproducible via dataset/make_split.py, seed=42)
+dataset/manifest_v1.csv
+dataset/manifest_v1_split.csv
+
 # Data logs
 *.log
 
