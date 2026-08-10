@@ -1,25 +1,32 @@
 [project]
-name = "vector"
+name = "bbvalidator"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "basedpyright>=1.39.4",
-    "biolmai>=0.4.0",
     "biotite>=1.6.0",
-    "black>=26.5.0",
     "h5py>=3.16.0",
-    "jax>=0.10.0",
+    "matplotlib>=3.11.1",
     "numpy>=2.4.4",
     "pandas>=3.0.3",
-    "pyrefly>=0.60.0",
-    "pytest>=9.0.3",
     "requests>=2.33.1",
-    "ruff>=0.15.13",
-    "scipy-stubs~=1.17.1",
+    "scipy>=1.17.1",
     "tensorboard>=2.20.0",
     "torch>=2.11.0",
     "torch-geometric>=2.7.0",
-    "torchvision>=0.26.0",
     "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.4",
+    "black>=26.5.0",
+    "pyrefly>=0.60.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.13",
+    "scipy-stubs~=1.17.1",
     "ty>=0.0.37",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["preprocess"]
+pythonpath = ["."]

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# ML artifacts / large binaries
+*.h5
+*.pth
+*.ckpt
+runs/
+checkpoints/
+dataset/latest/
+
+# Downloaded external datasets (MotifBench outputs and evaluations)
+data/ood/
+
+# Data logs
+*.log
+
+# LaTeX build artifacts
+*.aux
+*.out
+*.toc
+*.synctex.gz
+course_work*.pdf
