@@ -1,0 +1,26 @@
+{
+  "n_targets": 29,
+  "correlations": {
+    "gps": {
+      "spearman_total": -0.19924450819934875,
+      "spearman_total_p": 0.30010730902559507,
+      "pearson_total": -0.09176321835983593,
+      "spearman_motif": -0.10299293186996411,
+      "spearman_scaffold": -0.2640364253393625
+    },
+    "hybrid": {
+      "spearman_total": NaN,
+      "spearman_total_p": NaN,
+      "pearson_total": NaN,
+      "spearman_motif": NaN,
+      "spearman_scaffold": NaN
+    },
+    "mlp": {
+      "spearman_total": -0.1268941813908,
+      "spearman_total_p": 0.5118580688273132,
+      "pearson_total": -0.11151731335248871,
+      "spearman_motif": 0.11309597914247999,
+      "spearman_scaffold": -0.10792165329935999
+    }
+  }
+}

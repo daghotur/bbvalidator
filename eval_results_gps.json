@@ -1,0 +1,125 @@
+{
+  "fold": {
+    "n_samples": 63780,
+    "accuracy": 0.9461273126371903,
+    "roc_auc": 0.9798258215490867,
+    "pr_auc": 0.9407760699389985,
+    "ece": 0.007869429186028674,
+    "precision": 0.8858008658008658,
+    "recall": 0.9624647224835372,
+    "tp": 20462,
+    "fp": 2638,
+    "fn": 798,
+    "tn": 39882
+  },
+  "per_strategy": {
+    "borderline_hinge_defect": {
+      "n": 6322,
+      "specificity": 0.8470420752926289,
+      "roc_auc": 0.9509016878150721,
+      "accuracy": 0.8470420752926289
+    },
+    "borderline_local_fragment_rotation": {
+      "n": 6384,
+      "specificity": 0.7385651629072681,
+      "roc_auc": 0.9143489750953112,
+      "accuracy": 0.7385651629072681
+    },
+    "easy_chain_break": {
+      "n": 4288,
+      "specificity": 1.0,
+      "roc_auc": 0.9999995667096081,
+      "accuracy": 1.0
+    },
+    "easy_global_noise": {
+      "n": 4226,
+      "specificity": 1.0,
+      "roc_auc": 0.9999998553059745,
+      "accuracy": 1.0
+    },
+    "hard_core_unpacked": {
+      "n": 7135,
+      "specificity": 1.0,
+      "roc_auc": 0.9999999472608957,
+      "accuracy": 1.0
+    },
+    "hard_false_compact": {
+      "n": 7014,
+      "specificity": 1.0,
+      "roc_auc": 0.9999999865877706,
+      "accuracy": 1.0
+    },
+    "hard_near_native": {
+      "n": 7151,
+      "specificity": 0.9997203188365263,
+      "roc_auc": 0.9999150530953509,
+      "accuracy": 0.9997203188365263
+    },
+    "positive_real": {
+      "n": 21260,
+      "recall": 0.9624647224835372,
+      "accuracy": 0.9624647224835372
+    }
+  },
+  "failure_mode": {
+    "accuracy": 0.9401379742866102,
+    "confusion": [
+      [
+        20065,
+        0,
+        0,
+        11,
+        1184,
+        0
+      ],
+      [
+        0,
+        8470,
+        44,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        158,
+        13975,
+        0,
+        16,
+        0
+      ],
+      [
+        3,
+        0,
+        0,
+        7147,
+        1,
+        0
+      ],
+      [
+        2390,
+        0,
+        4,
+        7,
+        10305,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "aux": {
+    "rmsd_mse_log1p": 0.12162952870130539,
+    "steric_mse": 1.0624487913446501e-05
+  },
+  "architecture": "gps",
+  "split": "test",
+  "checkpoint": "/home/pc/PycharmProjects/BbValidator/checkpoints/baseline_gps_best.pth",
+  "manifest": "/home/pc/PycharmProjects/BbValidator/dataset/manifest_v1_split.csv"
+}
