@@ -54,12 +54,20 @@ class MLPHead(nn.Module):
 
 class ProteinMultiTaskHeads(nn.Module):
     """
-    Пять независимых голов для регуляризации энкодера:
+    Четыре независимые головы для регуляризации энкодера:
       fold_logit   — бинарная: foldable vs decoy
       rmsd         — регрессия RMSD (в log1p-пространстве)
       steric       — регрессия стерических клэшей
-      hbond        — регрессия числа водородных связей
-      failure_mode — классификация: 0=Ok, 1=Clash, 2=Core, 3=Loop
+      failure_mode — классификация на 6 классов (см. FAILURE_MODE_MAP
+                     в dataset/build_negative_dataset.py):
+                       0=positive_real, 1=easy(noise/break),
+                       2=hard(core/compact), 3=hard_near_native,
+                       4=borderline(hinge/fragment), 5=unknown_negative
+                     Класс 5 в данных пока отсутствует — выход зарезервирован
+                     под будущие OOD-негативы (решение 2026-08-09).
+
+    H-связи как auxiliary-задача убраны: hbond_count остаётся входной фичей
+    фронтенда (hb_norm), но отдельной головы и таргета для него нет.
     """
 
     def __init__(self, d_model: int, dropout: float = 0.15):
@@ -67,7 +75,6 @@ class ProteinMultiTaskHeads(nn.Module):
         self.fold_head = MLPHead(d_model, 1, dropout)
         self.rmsd_head = MLPHead(d_model, 1, dropout)
         self.steric_head = MLPHead(d_model, 1, dropout)
-        self.hbond_head = MLPHead(d_model, 1, dropout)
         self.failure_mode_head = MLPHead(d_model, 6, dropout)
 
     def forward(self, protein_repr: torch.Tensor) -> dict:
@@ -75,8 +82,7 @@ class ProteinMultiTaskHeads(nn.Module):
             "fold_logit": self.fold_head(protein_repr).squeeze(-1),  # [B]
             "rmsd": self.rmsd_head(protein_repr).squeeze(-1),  # [B]
             "steric": self.steric_head(protein_repr).squeeze(-1),  # [B]
-            "hbond": self.hbond_head(protein_repr).squeeze(-1),  # [B]
-            "failure_mode": self.failure_mode_head(protein_repr),  # [B, 4]
+            "failure_mode": self.failure_mode_head(protein_repr),  # [B, 6]
         }
 
 
@@ -95,17 +101,16 @@ class DynamicMultiTaskLoss(nn.Module):
 
     def __init__(
             self,
-            num_tasks: int = 5,
+            num_tasks: int = 4,
             failure_class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
         # Обучаемые лог-дисперсии, по одной на задачу
         self.log_vars = nn.Parameter(torch.zeros(num_tasks))
 
-        # FIX [4]: веса классов для компенсации дисбаланса failure_mode.
-        # Пример вычисления перед обучением:
-        #   counts = torch.tensor([n_ok, n_clash, n_core, n_loop], dtype=float)
-        #   weights = (1.0 / counts); weights /= weights.sum()
+        # Веса классов для компенсации дисбаланса failure_mode.
+        # Вычисляются по train-сплиту: weights = 1/counts, затем нормализуются
+        # на сумму (см. load_failure_class_weights в train_model.py).
         if failure_class_weights is not None:
             self.register_buffer("failure_class_weights", failure_class_weights)
         else:
@@ -124,9 +129,8 @@ class DynamicMultiTaskLoss(nn.Module):
         rmsd_target = torch.log1p(batch["rmsd_target"].float())
         loss_rmsd = F.mse_loss(preds["rmsd"], rmsd_target)
 
-        # 3. Физические прокси
+        # 3. Стерические клэши
         loss_steric = F.mse_loss(preds["steric"], batch["steric_target"].float())
-        loss_hbond = F.mse_loss(preds["hbond"], batch["hbond_target"].float())
 
         # 4. Тип ошибки структуры (с поддержкой class weights)
         loss_fail = F.cross_entropy(
@@ -135,9 +139,9 @@ class DynamicMultiTaskLoss(nn.Module):
             weight=self.failure_class_weights,
         )
 
-        losses = torch.stack([loss_fold, loss_rmsd, loss_steric, loss_hbond, loss_fail])
+        losses = torch.stack([loss_fold, loss_rmsd, loss_steric, loss_fail])
 
-        # FIX [1]: правильная формула Kendall — множитель 0.5
+        # Формула Kendall & Gal: множитель 0.5 при precision и log-var
         precision = torch.exp(-self.log_vars)
         total_loss = torch.sum(0.5 * precision * losses + 0.5 * self.log_vars)
 
@@ -145,7 +149,6 @@ class DynamicMultiTaskLoss(nn.Module):
             "loss_fold": loss_fold.item(),
             "loss_rmsd": loss_rmsd.item(),
             "loss_steric": loss_steric.item(),
-            "loss_hbond": loss_hbond.item(),
             "loss_fail": loss_fail.item(),
             "weights": precision.detach().cpu().numpy(),
         }
@@ -206,7 +209,7 @@ def predict_with_uncertainty(
     Параметры
     ----------
     model   : обученная ProteinScoreModel
-    coords  : [B, N, 3]  — координаты Cα
+    coords  : [B, N, 3, 3]  — backbone-координаты [N, Cα, C]
     mask    : [B, N]  bool — True = валидный остаток
     mc_runs : число форвард-пассов для оценки дисперсии (8–32 обычно достаточно)
 

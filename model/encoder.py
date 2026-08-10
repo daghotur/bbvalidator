@@ -4,8 +4,9 @@ model/encoder.py
 HybridProteinEncoder: Graph message-passing (MPNN) → Pre-LayerNorm Transformer.
 
 Входной контракт (dict от BiophysicalFrontend):
-  node_features  : [B, N, node_in_dim]
-  pair_features  : [B, N, N, pair_in_dim]
+  node_feats     : [B, N, node_in_dim]
+  edge_indices   : List[Tensor(2, E_b)]        — kNN-рёбра на граф в батче
+  edge_attrs     : List[Tensor(E_b, pair_in_dim)] — признаки рёбер (RBF + seq)
   mask           : [B, N]  bool — True = валидный остаток, False = паддинг
 
 Выход: node embeddings [B, N, d_model]
