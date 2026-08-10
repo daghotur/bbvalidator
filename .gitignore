@@ -31,9 +31,16 @@ dataset/manifest_v1_split.csv
 # Data logs
 *.log
 
+# Evaluation / analysis run outputs (reproducible via eval_*.py and analysis_*.py)
+eval_results_*
+fadiff_self_consistency.csv
+
 # LaTeX build artifacts
 *.aux
 *.out
 *.toc
 *.synctex.gz
 course_work*.pdf
+
+# Coursework texts (kept locally only)
+course_work*.tex
