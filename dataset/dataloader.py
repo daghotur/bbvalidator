@@ -1,12 +1,12 @@
 import os
+import random
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Sequence
 
 import h5py
 import numpy as np
 import pandas as pd
 import torch
-from scipy.spatial.transform import Rotation
 from torch.utils.data import DataLoader, Dataset
 
 # Per-worker HDF5 file handle cache (thread-safe, не требует повторного открытия)
@@ -21,12 +21,85 @@ def _open_h5(path: str) -> h5py.File:
     return _h5_cache.files[path]
 
 
+class LengthBucketBatchSampler:
+    """Batch-сэмплер, группирующий сэмплы близкой длины в один батч.
+
+    Белки в датасете имеют длину 50–700 остатков; при случайном батчинге
+    короткий батч паддится до самого длинного сэмпла, и вычисления тратятся
+    на паддинг. Бакеты шириной bucket_width ограничивают переплату паддингом
+    сверху величиной bucket_width.
+
+    Порядок: индексы раскладываются по бакетам (length // bucket_width),
+    внутри бакета перемешиваются, затем батчи перемешиваются между собой.
+    Между эпохами рисунок меняется через set_epoch(epoch).
+    """
+
+    def __init__(
+        self,
+        lengths: Sequence[int],
+        batch_size: int,
+        bucket_width: int = 50,
+        shuffle: bool = True,
+        seed: int = 42,
+        drop_last: bool = False,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size должен быть положительным")
+        if bucket_width <= 0:
+            raise ValueError("bucket_width должен быть положительным")
+
+        self.lengths = np.asarray(lengths, dtype=np.int64)
+        self.batch_size = batch_size
+        self.bucket_width = bucket_width
+        self.shuffle = shuffle
+        self.seed = seed
+        self.drop_last = drop_last
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def _bucket_indices(self) -> Dict[int, np.ndarray]:
+        bucket_ids = self.lengths // self.bucket_width
+        buckets: Dict[int, np.ndarray] = {}
+        for bucket in np.unique(bucket_ids):
+            buckets[int(bucket)] = np.flatnonzero(bucket_ids == bucket)
+        return buckets
+
+    def __len__(self) -> int:
+        total = 0
+        for idx in self._bucket_indices().values():
+            if self.drop_last:
+                total += len(idx) // self.batch_size
+            else:
+                total += (len(idx) + self.batch_size - 1) // self.batch_size
+        return total
+
+    def __iter__(self) -> Iterator[List[int]]:
+        rng = np.random.default_rng(self.seed + self.epoch)
+
+        batches: List[List[int]] = []
+        for bucket in sorted(self._bucket_indices()):
+            idx = self._bucket_indices()[bucket]
+            if self.shuffle:
+                rng.shuffle(idx)
+            for start in range(0, len(idx), self.batch_size):
+                chunk = idx[start : start + self.batch_size]
+                if self.drop_last and len(chunk) < self.batch_size:
+                    continue
+                batches.append(chunk.tolist())
+
+        if self.shuffle:
+            rng.shuffle(batches)
+
+        yield from batches
+
+
 class ProteinManifestDataset(Dataset):
     def __init__(
         self,
         manifest_path: str,
         split: str = "train",
-        augment_se3: bool = False,
         center_coords: bool = True,
         return_metadata: bool = True,
     ) -> None:
@@ -43,26 +116,30 @@ class ProteinManifestDataset(Dataset):
 
         self.df = df[df["split"] == split].reset_index(drop=True)
         self.split = split
-        self.augment_se3 = augment_se3
         self.center_coords = center_coords
         self.return_metadata = return_metadata
+        # Относительные source_h5 в манифесте резолвятся от его директории —
+        # датасет переносится между машинами без правок манифеста.
+        self._base_dir = os.path.dirname(os.path.abspath(manifest_path))
 
         if len(self.df) == 0:
             raise ValueError(f"No samples found for split='{split}' in {manifest_path}")
 
         print(
             f"Dataset '{split}' loaded: {len(self.df)} samples | "
-            f"augment_se3={self.augment_se3} | center_coords={self.center_coords}"
+            f"center_coords={self.center_coords}"
         )
 
     def __len__(self) -> int:
         return len(self.df)
 
     def __repr__(self) -> str:
-        return (
-            f"ProteinManifestDataset(split={self.split!r}, n={len(self.df)}, "
-            f"augment_se3={self.augment_se3})"
-        )
+        return f"ProteinManifestDataset(split={self.split!r}, n={len(self.df)})"
+
+    def _resolve_h5_path(self, raw_path: str) -> str:
+        if os.path.isabs(raw_path):
+            return raw_path
+        return os.path.join(self._base_dir, raw_path)
 
     @staticmethod
     def _get(row, key: str, default=None):
@@ -75,16 +152,10 @@ class ProteinManifestDataset(Dataset):
         centroid = coords.mean(axis=(0, 1), keepdims=True)  # [1, 1, 3]
         return coords - centroid
 
-    @staticmethod
-    def _apply_random_rotation(coords: np.ndarray) -> np.ndarray:
-        rot = Rotation.random().as_matrix().astype(np.float32)  # [3, 3]
-        rotated = coords.reshape(-1, 3) @ rot.T
-        return rotated.reshape(coords.shape).astype(np.float32)
-
     def __getitem__(self, idx: int) -> Dict:  # ty:ignore[invalid-method-override]
         row = self.df.iloc[idx]
 
-        h5_path = str(row["source_h5"])
+        h5_path = self._resolve_h5_path(str(row["source_h5"]))
         group_key = str(row["h5_group_key"])
         label = float(row["label"])
 
@@ -102,12 +173,9 @@ class ProteinManifestDataset(Dataset):
 
         if self.center_coords:
             coords = self._center_coords(coords)
-        if self.augment_se3:
-            coords = self._apply_random_rotation(coords)
 
         rmsd_target = float(grp.attrs.get("rmsd_target", 0.0))
         steric_target = float(grp.attrs.get("steric_target", 0.0))
-        hbond_target = float(grp.attrs.get("hbond_target", 0.0))
         failure_mode = int(grp.attrs.get("failure_mode_label", 0))
 
         item: Dict = {
@@ -115,7 +183,6 @@ class ProteinManifestDataset(Dataset):
             "label": torch.tensor([label], dtype=torch.float32),
             "rmsd_target": torch.tensor(rmsd_target, dtype=torch.float32),
             "steric_target": torch.tensor(steric_target, dtype=torch.float32),
-            "hbond_target": torch.tensor(hbond_target, dtype=torch.float32),
             "failure_mode_label": torch.tensor(failure_mode, dtype=torch.long),
             "length": int(coords.shape[0]),
         }
@@ -148,7 +215,6 @@ def protein_collate_fn(batch: List[Dict]) -> Dict:
     lengths = torch.zeros((B,), dtype=torch.long)
     rmsd_targets = torch.zeros((B,), dtype=torch.float32)
     steric_targets = torch.zeros((B,), dtype=torch.float32)
-    hbond_targets = torch.zeros((B,), dtype=torch.float32)
     failure_labels = torch.zeros((B,), dtype=torch.long)
 
     meta_keys = [
@@ -171,7 +237,6 @@ def protein_collate_fn(batch: List[Dict]) -> Dict:
 
         rmsd_targets[i] = item["rmsd_target"]
         steric_targets[i] = item["steric_target"]
-        hbond_targets[i] = item["hbond_target"]
         failure_labels[i] = item["failure_mode_label"]
         labels[i] = item["label"]
         lengths[i] = L
@@ -184,7 +249,6 @@ def protein_collate_fn(batch: List[Dict]) -> Dict:
         "label": labels,
         "rmsd_target": rmsd_targets,
         "steric_target": steric_targets,
-        "hbond_target": hbond_targets,
         "failure_mode_label": failure_labels,
         "length": lengths,
         **meta,
@@ -197,15 +261,15 @@ def make_loader(
     batch_size: int = 32,
     num_workers: int = 4,
     shuffle: Optional[bool] = None,
-    augment_se3: bool = False,
     pin_memory: bool = True,
     persistent_workers: bool = True,
     drop_last: bool = False,
+    bucket_width: int = 50,
+    seed: int = 42,
 ) -> DataLoader:
     dataset = ProteinManifestDataset(
         manifest_path=manifest_path,
         split=split,
-        augment_se3=augment_se3,
         center_coords=True,
         return_metadata=True,
     )
@@ -214,15 +278,29 @@ def make_loader(
         shuffle = split == "train"
     use_persistent = persistent_workers and num_workers > 0
 
+    batch_sampler = LengthBucketBatchSampler(
+        lengths=dataset.df["length"].tolist(),
+        batch_size=batch_size,
+        bucket_width=bucket_width,
+        shuffle=shuffle,
+        seed=seed,
+        drop_last=drop_last,
+    )
+
+    # Сид на worker: любая будущая случайность в __getitem__ воспроизводима.
+    def _worker_init(worker_id: int) -> None:
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+
     return DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        batch_sampler=batch_sampler,
         collate_fn=protein_collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=use_persistent,
-        drop_last=drop_last,
+        worker_init_fn=_worker_init if num_workers > 0 else None,
     )
 
 
@@ -231,6 +309,7 @@ def get_dataloaders(
     batch_size: int = 32,
     num_workers: int = 4,
     pin_memory: bool = True,
+    seed: int = 42,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     train_loader = make_loader(
         manifest_path,
@@ -238,8 +317,8 @@ def get_dataloaders(
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=True,
-        augment_se3=True,
         pin_memory=pin_memory,
+        seed=seed,
     )
     val_loader = make_loader(
         manifest_path,
@@ -247,8 +326,8 @@ def get_dataloaders(
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False,
-        augment_se3=False,
         pin_memory=pin_memory,
+        seed=seed,
     )
     test_loader = make_loader(
         manifest_path,
@@ -256,8 +335,8 @@ def get_dataloaders(
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False,
-        augment_se3=False,
         pin_memory=pin_memory,
+        seed=seed,
     )
     return train_loader, val_loader, test_loader
 

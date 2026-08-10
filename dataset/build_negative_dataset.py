@@ -23,7 +23,7 @@ FAILURE_MODE_MAP = {
     "unknown_negative": 5,
 }
 
-# steric_target и hbond_target проставляет dataset/compute_targets.py
+# steric_target проставляет dataset/compute_targets.py
 # отдельным проходом после генерации негативов.
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -320,7 +320,6 @@ def build_decoys(
                 # Новые Multi-Task таргеты
                 grp.attrs["rmsd_target"] = rmsd_val
                 grp.attrs["steric_target"] = float("nan")
-                grp.attrs["hbond_target"] = float("nan")
                 grp.attrs["failure_mode_label"] = failure_label
 
                 counts[strategy_name] = counts.get(strategy_name, 0) + 1

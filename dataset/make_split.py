@@ -32,6 +32,12 @@ def _safe_attr(attrs, key, default=None):
     return value
 
 
+def _manifest_rel_path(h5_path: str) -> str:
+    """Путь к h5 относительно директории манифеста — датасет переносим."""
+    out_dir = os.path.dirname(os.path.abspath(OUT_MANIFEST))
+    return os.path.relpath(os.path.abspath(h5_path), out_dir)
+
+
 def read_positive_manifest(pos_h5_path: str) -> list[dict]:
     rows = []
     with h5py.File(pos_h5_path, "r") as h5f:
@@ -43,7 +49,7 @@ def read_positive_manifest(pos_h5_path: str) -> list[dict]:
             rows.append(
                 {
                     "sample_key": f"pos::{key}",
-                    "source_h5": os.path.abspath(pos_h5_path),
+                    "source_h5": _manifest_rel_path(pos_h5_path),
                     "h5_group_key": key,
                     "label": 1,
                     "group_id": key,
@@ -58,7 +64,6 @@ def read_positive_manifest(pos_h5_path: str) -> list[dict]:
                     "random_seed": None,
                     "rmsd_target": float(_safe_attr(grp.attrs, "rmsd_target", 0.0)),
                     "steric_target": float(_safe_attr(grp.attrs, "steric_target", 0.0)),
-                    "hbond_target": float(_safe_attr(grp.attrs, "hbond_target", 0.0)),
                     "failure_mode_label": int(
                         _safe_attr(grp.attrs, "failure_mode_label", 0)
                     ),
@@ -83,7 +88,7 @@ def read_negative_manifest(neg_h5_path: str) -> list[dict]:
             rows.append(
                 {
                     "sample_key": f"neg::{key}",
-                    "source_h5": os.path.abspath(neg_h5_path),
+                    "source_h5": _manifest_rel_path(neg_h5_path),
                     "h5_group_key": key,
                     "label": 0,
                     "group_id": parent_key,
@@ -98,7 +103,6 @@ def read_negative_manifest(neg_h5_path: str) -> list[dict]:
                     "random_seed": _safe_attr(grp.attrs, "random_seed", None),
                     "rmsd_target": float(_safe_attr(grp.attrs, "rmsd_target", 0.0)),
                     "steric_target": float(_safe_attr(grp.attrs, "steric_target", 0.0)),
-                    "hbond_target": float(_safe_attr(grp.attrs, "hbond_target", 0.0)),
                     "failure_mode_label": int(
                         _safe_attr(grp.attrs, "failure_mode_label", 5)
                     ),

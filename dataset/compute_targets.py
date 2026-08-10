@@ -1,9 +1,12 @@
 """
-Постобработка H5-датасетов: считаем steric_target и hbond_target через
+Постобработка H5-датасетов: считаем steric_target через
 BackboneGeometryExtractor отдельно от параллельной сборки.
+
+H-связи как auxiliary-таргет убраны (решение 2026-08-09): hbond_count
+остаётся входной фичей фронтенда, но отдельной регрессионной головы нет.
 """
+
 import os
-from typing import Tuple
 
 import h5py
 import numpy as np
@@ -13,41 +16,37 @@ from tqdm import tqdm
 from preprocess import geometry_features
 
 
-def _build_extractor() -> geometry_features.BackboneGeometryExtractor:
-    return geometry_features.BackboneGeometryExtractor().eval()
+def _build_extractor() -> tuple[geometry_features.BackboneGeometryExtractor, torch.device]:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return geometry_features.BackboneGeometryExtractor().eval(), device
 
 
 @torch.no_grad()
-def _compute_for_coords(
-        extractor: geometry_features.BackboneGeometryExtractor,
-        coords: np.ndarray,
-) -> Tuple[float, float]:
+def _compute_steric(
+    extractor: geometry_features.BackboneGeometryExtractor,
+    coords: np.ndarray,
+    device: torch.device,
+) -> float:
     length = len(coords)
-    coords_pt = torch.from_numpy(coords.astype(np.float32)).unsqueeze(0)
+    coords_pt = torch.from_numpy(coords.astype(np.float32)).unsqueeze(0).to(device)
     feats = extractor(coords_pt)
 
     clash_total = feats["clash_count"].sum().item()
-    steric_val = clash_total / length
-
-    hbonds_total = feats["hbond_count"].sum().item()
-    hbond_val = max(0.0, (length - hbonds_total) / length)
-
-    return float(steric_val), float(hbond_val)
+    return float(clash_total / length)
 
 
 def _needs_recompute(grp: h5py.Group) -> bool:
     steric = grp.attrs.get("steric_target", None)
-    hbond = grp.attrs.get("hbond_target", None)
-    if steric is None or hbond is None:
+    if steric is None:
         return True
-    return not (np.isfinite(steric) and np.isfinite(hbond))
+    return not np.isfinite(steric)
 
 
 def compute_targets_for_h5(h5_path: str, *, force: bool = False) -> None:
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"Не найден файл: {os.path.abspath(h5_path)}")
 
-    extractor = _build_extractor()
+    extractor, device = _build_extractor()
 
     with h5py.File(h5_path, "r+") as h5f:
         keys = list(h5f.keys())
@@ -64,13 +63,13 @@ def compute_targets_for_h5(h5_path: str, *, force: bool = False) -> None:
                 continue
 
             coords = grp["coords"][:]
-            steric_val, hbond_val = _compute_for_coords(extractor, coords)
-            grp.attrs["steric_target"] = steric_val
-            grp.attrs["hbond_target"] = hbond_val
+            grp.attrs["steric_target"] = _compute_steric(extractor, coords, device)
             updated += 1
 
     print(f"{h5_path}: обновлено {updated}, пропущено {skipped}")
 
 
 if __name__ == "__main__":
-    compute_targets_for_h5("negative_proteins.h5")
+    # Стерические таргеты нужны и позитивам, и негативам.
+    for h5_name in ["positive_proteins.h5", "negative_proteins.h5"]:
+        compute_targets_for_h5(h5_name)

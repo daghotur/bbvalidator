@@ -11,9 +11,9 @@ import biotite.structure.io.pdbx as pdbx
 import biotite.database.rcsb as rcsb
 from tqdm import tqdm
 
-# steric_target и hbond_target считаются отдельным скриптом
-# dataset/compute_targets.py после завершения параллельной сборки —
-# чтобы torch-операции не мешали распараллеливанию воркеров.
+# steric_target считается отдельным скриптом dataset/compute_targets.py
+# после завершения параллельной сборки — чтобы torch-операции не мешали
+# распараллеливанию воркеров.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -142,11 +142,10 @@ def process_pdb_file(
                     results.append((instance_name, None, "Chain broken", None))
                     continue
 
-                # steric_target и hbond_target проставит compute_targets.py
+                # steric_target проставит compute_targets.py
                 targets = {
                     "rmsd_target": 0.0,
                     "steric_target": float("nan"),
-                    "hbond_target": float("nan"),
                     "failure_mode_label": 0,
                 }
 
