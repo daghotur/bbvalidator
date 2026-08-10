@@ -1,8 +1,10 @@
-# ProteinScoreModel
+# ProteinScoreModel (BbValidator)
 
 Пайплайн глубокого обучения для оценки **складываемости сгенерированных белковых backbone-структур**.
 
-По сырым координатам backbone `[N, Cα, C]` модель предсказывает, сможет ли структура успешно свернуться, оценивает RMSD относительно нативной структуры, выявляет стерические конфликты и паттерны водородных связей, а также классифицирует доминирующий тип ошибки — всё за один прямой проход.
+По сырым координатам backbone `[N, Cα, C]` модель предсказывает, сможет ли структура успешно свернуться, оценивает RMSD относительно нативной структуры, выявляет стерические конфликты и классифицирует доминирующий тип ошибки — всё за один прямой проход.
+
+**Полная документация:** [`docs/`](docs/README.md) — обзор и постановка, биофизический фронтенд, модель и обучение, датасет, эксперименты и результаты, запуск и использование.
 
 ---
 
@@ -29,11 +31,10 @@ flowchart TD
     POOL["MultiHeadAttentionPooling · H = 4<br/>softmax over L → [B, 192]"]
 
     subgraph HEADS["ProteinMultiTaskHeads"]
-        H1["fold_logit"] 
+        H1["fold_logit"]
         H2["rmsd"]
         H3["steric"]
-        H4["hbond"]
-        H5["failure_mode<br/>(4 класса)"]
+        H4["failure_mode<br/>(6 выходов, класс 5 зарезервирован)"]
     end
 
     LOSS["DynamicMultiTaskLoss · Kendall & Gal 2018<br/>∑ ½·exp(−sᵢ)·Lᵢ + ½·sᵢ   (sᵢ learnable)"]
@@ -50,7 +51,13 @@ flowchart TD
     HEADS --> LOSS
 ```
 
-Фронтенд вычисляет физически осмысленные признаки **один раз** и кеширует их.
+Ключевые принципы:
+
+- **Инвариантность по построению.** Все признаки фронтенда — расстояния, торсионы, секвенс-сепарации — SE(3)-инвариантны, поэтому модель инвариантна к поворотам/сдвигам без эквивариантных слоёв.
+- **Честная PCA фрагментов.** `pca_proj` во фронтенде инициализируется собственными векторами попарных расстояний 9-остаточных фрагментов из нативных структур (`preprocess/fit_pca.py`) и замораживается.
+- **Четыре задачи.** H-связи как отдельная auxiliary-голова убраны (решение 2026-08-09): `hbond_count` остаётся **входным признаком** (`hb_norm`), но головы и таргета для него нет.
+- **failure_mode — 6 выходов, 5 классов в данных.** Класс 5 (`unknown_negative`) зарезервирован под будущие OOD-негативы (например, выходы внешних генераторов).
+
 Во время инференса энкодер запускается `mc_runs` раз с включённым dropout для получения калиброванных оценок неопределённости (MC-Dropout).
 
 ---
@@ -59,24 +66,38 @@ flowchart TD
 
 ```text
 .
-├── build_positive_dataset.py   # Сбор нативных структур через RCSB API
-├── build_negative_dataset.py   # Генерация декоев (7 стратегий деформаций)
-├── compute_targets.py          # Изолированный пост-расчёт физических таргетов
-├── make_split.py               # Группировка манифеста и валидация утечек
-├── dataloader.py               # Оптимизированный HDF5 DataLoader с SE(3)-аугментацией
+├── train_model.py              # Обучение основной модели (селекция по (AUC+PR-AUC)/2)
+├── eval_model.py               # Полная батарея метрик на сплите (JSON + markdown)
+├── inference.py                # CLI-инференс PDB-файлов с MC-Dropout
+├── benchmark.py                # Замеры латентности/пропускной способности
+│
+├── dataset/
+│   ├── build_positive_dataset.py   # Сбор нативных структур через RCSB API
+│   ├── build_negative_dataset.py   # Генерация декоев (7 стратегий деформаций)
+│   ├── compute_targets.py          # Пост-расчёт steric_target (GPU)
+│   ├── make_split.py               # Манифесты и сплиты по group_id (анти-утечка)
+│   ├── dataloader.py               # HDF5 DataLoader, бакетизация по длине
+│   ├── manifest_v1_split.csv       # source_h5 — относительные пути
+│   └── *.h5                        # данные (git-ignored)
 │
 ├── preprocess/
-│   └── __init__.py
+│   ├── biophys_frontend.py         # Оркестратор извлечения признаков
+│   ├── geometry_features.py        # Торсионы, виртуальные Cβ/O, клэши, H-связи
+│   ├── foldability_features.py     # Упаковка, экспонированность, PCA фрагментов
+│   ├── pair_features.py            # Парные признаки и kNN-граф
+│   ├── fit_pca.py                  # Fit PCA по нативным структурам
+│   ├── test_geometry.py            # Тесты геометрии (pytest)
+│   ├── test_foldability.py         # Тесты foldability-признаков (pytest)
+│   └── conftest.py                 # pytest-фикстуры
 │
 ├── model/
-│   ├── biophys_frontend.py     # Оркестратор извлечения признаков
-│   ├── geometry_features.py    # Вычисление диэдральных углов и виртуальных атомов
-│   ├── foldability_features.py # Плотность упаковки, экспонированность, PCA фрагментов
-│   ├── pair_features.py        # Построение парных признаков и RBF-расстояний
-│   └── encoder.py              # Гибридный граф-трансформер энкодер
+│   ├── encoder.py                  # Гибридный граф-трансформер энкодер
+│   ├── heads_loss.py               # Пулинг, головы, Dynamic Multi-Task Loss, MC-Dropout
+│   └── metrics.py                  # ROC-AUC, PR-AUC, ECE (numpy/scipy)
 │
-└── loss/
-    └── heads_loss.py           # Головы, пулинг, Dynamic Multi-Task Loss, MC-Dropout
+└── baselines/
+    ├── encoders.py                 # BaselineMLPEncoder, BaselineGPSEncoder
+    └── train_baseline.py           # Обучение базлайнов по тому же протоколу
 ```
 
 ---
@@ -84,8 +105,21 @@ flowchart TD
 ## Установка
 
 ```bash
-pip install torch torchvision torch-geometric biotite scipy pandas h5py tensorboard
+uv sync          # Python >= 3.13, зависимости из pyproject.toml
 ```
+
+или вручную:
+
+```bash
+pip install torch torch-geometric biotite scipy pandas h5py tensorboard requests tqdm
+```
+
+Тесты:
+
+```bash
+pytest           # 12 тестов фронтенда (CPU, < 1 с)
+```
+
 ---
 
 ## Формат данных
@@ -95,7 +129,7 @@ pip install torch torchvision torch-geometric biotite scipy pandas h5py tensorbo
 | Колонка | Тип | Описание |
 |---|---|---|
 | `split` | str | `train` / `val` / `test` |
-| `source_h5` | str | Путь к HDF5-файлу, содержащему данный сэмпл |
+| `source_h5` | str | Путь к HDF5-файлу **относительно директории манифеста** (датасет переносим) |
 | `h5_group_key` | str | Ключ группы внутри HDF5-файла |
 | `label` | float | 1.0 = foldable, 0.0 = decoy |
 
@@ -107,65 +141,67 @@ pip install torch torchvision torch-geometric biotite scipy pandas h5py tensorbo
 |---|---|---|
 | `rmsd_target` | 0.0 | Backbone RMSD до нативной структуры (Å) |
 | `steric_target` | 0.0 | Нормализованное число стерических конфликтов |
-| `hbond_target` | 0.0 | Нормализованное число водородных связей |
-| `failure_mode_label` | 0 | 0=Ok · 1=Clash · 2=Core · 3=Loop |
+| `failure_mode_label` | 0 | 0=Ok · 1=Easy · 2=Hard(core/compact) · 3=NearNative · 4=Borderline · 5=Unknown(резерв) |
 
 ---
 
 ## Пошаговый запуск пайплайна данных
 
-Для подготовки сбалансированного датасета выполните последовательно следующие модули.
+Все команды выполняются из корня репозитория, данные кладутся в `dataset/`.
 
 ### 1. Сбор нативных белков
 
-Скрипт формирует композитный запрос к RCSB, скачивает валидные `.cif`-файлы, извлекает backbone (`N`, `Cα`, `C`) и проверяет непрерывность пептидных связей (`≤ 2.0 Å`).
+Композитный запрос к RCSB (X-Ray, разрешение ≤ 2.0 Å, длина 50–700 а.о.), скачивание `.cif`, извлечение backbone и проверка непрерывности пептидных связей (≤ 2.0 Å).
 
 ```bash
-python build_positive_dataset.py
+cd dataset && python build_positive_dataset.py && cd ..
 ```
 
-- **Вход:** запрос к RCSB API (фильтры: X-Ray, разрешение `≤ 2.0 Å`, длина `50–700` а.о.).
-- **Выход:** `positive_proteins.h5`
+Выход: `dataset/positive_proteins.h5`.
 
-### 2. Генерация декоев (негативный сэмплинг)
+### 2. Генерация декоев
 
-Для каждого позитивного белка генерируется `N` искусственных структур-ловушек с разным уровнем критичности дефектов.
+Для каждого позитивного белка — 2 декоя по взвешенной смеси стратегий (20% easy / 50% hard / 30% borderline), seed=42.
 
 ```bash
-python build_negative_dataset.py
+cd dataset && python build_negative_dataset.py && cd ..
 ```
 
-- **Выход:** `negative_proteins.h5` (содержит метаданные применённой стратегии деформации)
+Выход: `dataset/negative_proteins.h5`.
 
-### 3. Автономный расчёт биофизических таргетов
+### 3. Расчёт стерических таргетов
 
-Выделенный шаг, рассчитывающий точные значения стерических столкновений и водородных связей с помощью GPU-векторизации.
-Вынос этого шага из основного загрузчика данных экономит до 40% времени эпохи обучения.
+`steric_target` считается отдельным проходом (GPU, идемпотентно — уже посчитанные группы пропускаются). Клэши детектируются по виртуальным Cβ (порог 3.5 Å), пары с |i−j| < 3 исключаются — это геометрия цепи, а не стерический конфликт.
 
 ```bash
-python compute_targets.py
+cd dataset && python compute_targets.py && cd ..
 ```
 
-- **Модифицирует файлы:** `positive_proteins.h5` и `negative_proteins.h5`
+### 4. Манифесты и сплиты
 
-### 4. Создание манифестов и разбиение на сплиты
-
-Формирует финальные таблицы и распределяет белки по выборкам `train`, `val` и `test`.
-Разбиение выполняется строго по PDB ID (`group_id`), что гарантирует: декой и его нативный родитель всегда находятся в одном сплите, исключая data leakage.
+Разбиение выполняется строго по родителю (`group_id`): декой и его нативная структура всегда в одном сплите — утечка данных исключена. Пути в манифесте относительные.
 
 ```bash
-python make_split.py
+cd dataset && python make_split.py && cd ..
 ```
 
-- **Выход:** `manifest_v1.csv`, `manifest_v1_split.csv`, `split_stats_v1.json`
+Выход: `dataset/manifest_v1.csv`, `dataset/manifest_v1_split.csv`, `dataset/split_stats_v1.json`.
+
+### 5. Fit PCA фронтенда
+
+Точная ковариация попарных расстояний 9-остаточных фрагментов одним проходом по позитивам (без хранения всех фрагментов в памяти), топ-16 собственных векторов:
+
+```bash
+python preprocess/fit_pca.py --h5 dataset/positive_proteins.h5 --out dataset/pca_components.pth
+```
+
+`dataset/pca_components.pth` не коммитится (воспроизводится этой командой) и обязателен для обучения и инференса.
 
 ---
 
 ## Многоуровневый негативный сэмплинг (Decoy Strategies)
 
-Модель обучается распознавать дефекты различной степени выраженности благодаря диверсифицированной генерации:
-
-| Категория | Название стратегии | Биофизическая суть искажения | Метка класса |
+| Категория | Название стратегии | Биофизическая суть искажения | Класс |
 |---|---|---|---|
 | Positive | `positive_real` | Нативная стабильная структура из PDB | 0 |
 | Easy | `easy_global_noise` | Гауссов шум высокого уровня (разрушение геометрии) | 1 |
@@ -180,8 +216,11 @@ python make_split.py
 
 ## Функция потерь: Homoscedastic Task Uncertainty
 
-Поскольку модель оптимизирует гетерогенные задачи (бинарная классификация, регрессия углов/расстояний в логарифмических шкалах и многоклассовое разделение), ручной подбор весов лоссов неэффективен.
-Реализован адаптивный лосс по методу Kendall & Gal (2018)
+Модель оптимизирует гетерогенные задачи (бинарная классификация, регрессия в логарифмических шкалах и многоклассовое разделение), поэтому веса лоссов обучаются автоматически по Kendall & Gal (2018):
+
+$$L = \sum_i \left[ \frac{L_i}{2\sigma_i^2} + \log \sigma_i \right] = \sum_i \left[ \tfrac{1}{2} e^{-s_i} L_i + \tfrac{1}{2} s_i \right]$$
+
+Для `failure_mode` дополнительно используются веса классов по обратной частоте train-сплита (компенсация дисбаланса).
 
 ---
 
@@ -191,27 +230,54 @@ python make_split.py
 python train_model.py
 ```
 
-Ключевые гиперпараметры задаются внутри `main()`:
-
-| Параметр | Значение по умолчанию | Описание |
+| Параметр | Значение | Описание |
 |---|---|---|
+| `seed` | 42 | torch/numpy/random, сэмплер и worker'ы |
 | `d_model` | 192 | Размер скрытого пространства энкодера |
-| `num_graph_layers` | 2 | Число MPNN-слоёв |
-| `num_transformer_layers` | 4 | Число слоёв Transformer encoder |
-| `num_heads` | 8 | Число attention-heads |
-| `dropout` | 0.15 | Вероятность dropout (encoder + heads) |
-| `batch_size` | 16 | Число сэмплов в батче |
-| `num_epochs` | 15 | Число эпох обучения |
-| `lr` (model) | 3e-4 | Learning rate AdamW для весов модели |
-| `lr` (loss) | 1e-3 | Learning rate AdamW для весов task uncertainty |
+| `num_graph_layers` | 2 | MPNN-слои (GRU-gate, gradient checkpointing) |
+| `num_transformer_layers` | 4 | Pre-LN Transformer |
+| `num_heads` | 8 | Attention-heads энкодера |
+| `dropout` | 0.15 | Encoder + heads |
+| `batch_size` | 16 | Бакеты по длине (ширина 50) — минимум паддинг-отходов |
+| `num_epochs` | 15 | Cosine annealing |
+| `lr` (model) | 3e-4 | AdamW, weight decay 1e-4 |
+| `lr` (loss) | 1e-3 | Отдельная param-group для log-variance лосса |
 
-Обучение использует **bfloat16 automatic mixed precision** и **gradient checkpointing** внутри MPNN-слоёв.
-Лучший чекпоинт (по validation accuracy) сохраняется в `checkpoints/best_model.pth`.
-Логи TensorBoard пишутся в `runs/ProteinScoreModel`.
+Обучение использует **bfloat16 automatic mixed precision**. Лучший чекпоинт выбирается по составной метрике **(Val ROC-AUC + Val PR-AUC) / 2** (порог-независимая, устойчива к дисбалансу классов 1:2) и сохраняется в `checkpoints/best_model.pth`; `checkpoints/last_model.pth` пишется всегда. Логи TensorBoard — `runs/ProteinScoreModel`.
 
 ```bash
 tensorboard --logdir runs/
 ```
+
+---
+
+## Базлайны
+
+Для сравнения архитектур в `baselines/` обучаются две модели **по тому же протоколу** (тот же фронтенд с PCA, пулинг, головы, лосс, сиды и селекция) — отличается только энкодер (d_model=128):
+
+```bash
+python baselines/train_baseline.py --encoder mlp   # MLP на остаток, без обмена между позициями
+python baselines/train_baseline.py --encoder gps   # GPSConv (TransformerConv + глобальное внимание)
+```
+
+Чекпоинты: `checkpoints/baseline_{mlp,gps}_{best,last}.pth`, логи: `runs/Baseline_{MLP,GPS}`.
+
+---
+
+## Оценка
+
+```bash
+python eval_model.py -c checkpoints/best_model.pth --split test -o eval_results.json
+```
+
+Батарея метрик на test-сплите:
+
+- **fold-задача:** Accuracy, ROC-AUC, PR-AUC, ECE (калибровка), precision/recall;
+- **per-strategy:** recall на нативах; specificity и ROC-AUC «нативы против семейства декоев» для каждой стратегии;
+- **failure_mode:** confusion matrix 6×6 и accuracy;
+- **auxiliary:** MSE голов RMSD (log1p) и steric.
+
+Результаты пишутся в JSON и печатаются markdown-таблицей.
 
 ---
 
@@ -241,6 +307,11 @@ python inference.py -i structure.pdb --cpu -m 32
 
 Визуальный индикатор: ✅ `P > 0.8` · ⚠️ `P > 0.4` · ❌ `P ≤ 0.4`
 
----
+Бенчмарк скорости:
 
----
+```bash
+python benchmark.py -i data/3MYC.pdb -c checkpoints/best_model.pth -m 16 -n 50
+```
+
+> Чекпоинты, обученные до пересборки 2026-08, несовместимы с текущей архитектурой
+> (убрана hbond-голова, добавлен PCA-буфер) — `inference.py` сообщит об этом явно.
