@@ -107,12 +107,25 @@ class BackboneGeometryExtractor(nn.Module):
         virtual_cb = CA + self.cb_length * F.normalize(cb_dir, dim=-1)
 
         # --- Виртуальный кислород ---
+        # Тригональная плоскость при C: направления на CA (u_o) и N(i+1) (v_o)
+        # разведены на ~116°, поэтому карбонильный O лежит напротив их биссектрисы:
+        # o_dir = -(u_o_n + v_o_n), угол O-C-CA получается ~122°.
         u_o = CA - C_at
-        v_o = torch.roll(N_at, shifts=-1, dims=1) - C_at
-        o_dir = F.normalize(F.normalize(u_o, dim=-1) + F.normalize(v_o, dim=-1), dim=-1)
-        oxygen = C_at + self.o_length * o_dir
+        next_N = torch.roll(N_at, shifts=-1, dims=1)
+        v_o = next_N - C_at
+        # roll замыкает последний остаток на первый; на C-конце нет N(i+1) —
+        # подставляем u_o (любой корректный вектор): строка O(N-1) всё равно
+        # исключена из подсчёта тригональной маской (не существует j >= i+3).
+        is_last = torch.zeros(B, N, dtype=torch.bool, device=device)
+        is_last[:, -1] = True
+        v_o = torch.where(is_last.unsqueeze(-1), u_o, v_o)
+        o_dir = F.normalize(
+            F.normalize(u_o, dim=-1) + F.normalize(v_o, dim=-1), dim=-1
+        )
+        oxygen = C_at - self.o_length * o_dir
 
         # --- Водородные связи (прокси по расстоянию O–N) ---
+        # Схема DSSP-типа: O(i)…N(j), j >= i+3, каждая связь считается один раз.
         dist_ON = torch.cdist(oxygen, N_at)
         hbond_mask = dist_ON < self.hbond_threshold
         tri_mask = torch.triu(
@@ -124,11 +137,15 @@ class BackboneGeometryExtractor(nn.Module):
         hbond_count = hb_valid.sum(dim=-1, dtype=torch.float32)
 
         # --- Клэши по виртуальному Cβ ---
+        # Пары с |i-j| < 3 — геометрия цепи, а не стерический конфликт.
         dist_cb = torch.cdist(virtual_cb, virtual_cb)
-        eye_mask = torch.eye(N, dtype=torch.bool, device=device)
-        dist_cb = dist_cb.masked_fill(eye_mask, float("inf"))
+        seq_idx = torch.arange(N, device=device)
+        seq_far = (seq_idx.unsqueeze(0) - seq_idx.unsqueeze(1)).abs() >= 3
         clash_mask_mat = (
-            (dist_cb < self.clash_threshold) & mask.unsqueeze(2) & mask.unsqueeze(1)
+            (dist_cb < self.clash_threshold)
+            & seq_far.unsqueeze(0)
+            & mask.unsqueeze(2)
+            & mask.unsqueeze(1)
         )
         clash_count_per_residue = clash_mask_mat.sum(dim=-1, dtype=torch.float32)
 

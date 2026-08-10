@@ -22,10 +22,12 @@ class FoldabilityProxies(nn.Module):
         triu = torch.triu_indices(fragment_size, fragment_size, offset=1)
         self.register_buffer("triu_indices", triu)
 
-        # Линейная PCA-проекция.
-        # В реальном пайплайне инициализируется собственными векторами из PDB-фрагментов
-        # и замораживается через freeze_pca().
+        # PCA-проекция попарных расстояний 9-остаточных фрагментов.
+        # Веса и среднее инициализируются скриптом preprocess/fit_pca.py
+        # по нативным структурам, после чего проекция замораживается через
+        # freeze_pca(). До fit-а веса случайные, среднее нулевое.
         self.pca_proj = nn.Linear(self.frag_pairs, pca_components, bias=False)
+        self.register_buffer("frag_mean", torch.zeros(self.frag_pairs))
 
     def freeze_pca(self) -> None:
         """Заморозить PCA-проекцию: веса не будут обновляться оптимизатором."""
@@ -103,7 +105,7 @@ class FoldabilityProxies(nn.Module):
         fragment_features = self._get_local_pairwise_distances(
             ca_coords
         )  # [B, N, frag_pairs]
-        pca_projection = self.pca_proj(fragment_features)  # [B, N, pca_components]
+        pca_projection = self.pca_proj(fragment_features - self.frag_mean)
 
         # 4. Loop Geometry Flags (stride-4 displacement — прокси кривизны)
         delta = ca_coords[:, 4:] - ca_coords[:, :-4]  # [B, N-4, 3]
