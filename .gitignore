@@ -21,7 +21,8 @@ venv/
 *.pth
 *.ckpt
 runs/
-checkpoints/
+checkpoints/*
+!checkpoints/best_model.pth
 dataset/latest/
 
 # Downloaded external datasets (MotifBench outputs and evaluations)
