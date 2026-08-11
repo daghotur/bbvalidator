@@ -81,6 +81,26 @@ python inference.py -i structure.pdb --cpu -m 32                        # CPU, 3
 
 Чекпоинты, обученные до пересборки 2026-08, несовместимы с текущей архитектурой (убрана hbond-голова, добавлен PCA-буфер) — `inference.py` сообщит об этом явно.
 
+## Фильтрация по дизайнуемости
+
+`filter_designability.py` батчево скорит каталог структур и для каждой выдаёт вердикт PASS/FAIL со списком заваленных гейтов:
+
+```bash
+python filter_designability.py -i data/ood/evodiff/scaffolds --min-pfold 0.5 --max-clashes 2 -o evodiff_filter.csv
+```
+
+Обязательный гейт — `--min-pfold`; опциональные: `--max-steric` (вероятность стерики), `--max-clashes` (сырые конфликты Cβ < 3.5 Å, |i-j| ≥ 3), `--max-rmsd`, `--max-uncertainty`. Независимо от гейтов verbose-вывод и CSV содержат все метрики: P(fold), MC-дисперсию, вероятность стерики, предсказанный RMSD, failure mode, сырые счётчики конфликтов и H-связей.
+
+## Интерактивные тетрадки
+
+```bash
+uv run jupyter lab     # jupyterlab ставится dev-зависимостью при uv sync
+```
+
+- `notebooks/01-kak-rabotaet.ipynb` — проход пайплайна по шагам: фронтенд, энкодер, головы, MC-Dropout, скоринг образцов из `data/`;
+- `notebooks/02-metriki-i-primery.ipynb` — метрики на test и выходах генераторов, распределения P(fold), лучшие/худшие примеры (нужны артефакты `eval_model.py` / `eval_generated.py`);
+- `notebooks/03-benchmark.ipynb` — живые замеры латентности против $M$ и длины.
+
 ## Бенчмарк скорости
 
 ```bash

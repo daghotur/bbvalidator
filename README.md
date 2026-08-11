@@ -70,6 +70,7 @@ flowchart TD
 ├── eval_model.py               # Полная батарея метрик на сплите (JSON + markdown)
 ├── inference.py                # CLI-инференс PDB-файлов с MC-Dropout
 ├── benchmark.py                # Замеры латентности/пропускной способности
+├── filter_designability.py     # Фильтр по дизайнуемости: PASS/FAIL + заваленные метрики
 │
 ├── dataset/
 │   ├── build_positive_dataset.py   # Сбор нативных структур через RCSB API
@@ -94,6 +95,8 @@ flowchart TD
 │   ├── encoder.py                  # Гибридный граф-трансформер энкодер
 │   ├── heads_loss.py               # Пулинг, головы, Dynamic Multi-Task Loss, MC-Dropout
 │   └── metrics.py                  # ROC-AUC, PR-AUC, ECE (numpy/scipy)
+│
+├── notebooks/                  # Jupyter-тетрадки: как работает, метрики, бенчмарк
 │
 └── baselines/
     ├── encoders.py                 # BaselineMLPEncoder, BaselineGPSEncoder
@@ -306,6 +309,32 @@ python inference.py -i structure.pdb --cpu -m 32
 | `Len` | Длина последовательности (число остатков) |
 
 Визуальный индикатор: ✅ `P > 0.8` · ⚠️ `P > 0.4` · ❌ `P ≤ 0.4`
+
+### Фильтр по дизайнуемости
+
+`filter_designability.py` батчево скорит каталог структур и для каждой печатает вердикт и конкретные заваленные метрики. Обязательный гейт — `--min-pfold`; опциональные — `--max-steric`, `--max-clashes` (сырые конфликты Cβ < 3.5 Å), `--max-rmsd`, `--max-uncertainty`:
+
+```bash
+python filter_designability.py -i data/ood/evodiff/scaffolds --min-pfold 0.5 --max-clashes 2 -o evodiff_filter.csv
+```
+
+```
+Файл           |   L | P(fold) |      u | p_стер |  RMSD | конфл | H-св | failure_mode  | вердикт
+14_5IUS_16.pdb | 142 |   0.000 | 0.0000 |  0.516 | 21.75 |     4 |   27 | easy(0.92)    | FAIL: pfold 0.000 < 0.50; конфликты 4 > 2
+22_1BCF_07.pdb | 157 |   0.918 | 0.0001 |  0.500 |  0.05 |     0 |  233 | ok(0.88)      | PASS
+```
+
+Полный CSV со всеми метриками (P(fold), MC-дисперсия, стерика, RMSD, failure mode, конфликты, H-связи) сохраняется в `-o`.
+
+### Интерактивные тетрадки
+
+`notebooks/` запускаются прямо в репозитории (`uv run jupyter lab`, jupyterlab — dev-зависимость):
+
+| Тетрадка | Содержание |
+|---|---|
+| `01-kak-rabotaet.ipynb` | проход пайплайна по шагам: фронтенд, головы, MC-Dropout, скоринг образцов |
+| `02-metriki-i-primery.ipynb` | метрики на test, распределения P(fold) по генераторам, лучшие/худшие примеры |
+| `03-benchmark.ipynb` | живые замеры латентности против $M$ и длины |
 
 Бенчмарк скорости:
 
