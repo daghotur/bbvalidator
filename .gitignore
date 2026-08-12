@@ -38,6 +38,8 @@ dataset/manifest_v1_split.csv
 # Evaluation / analysis run outputs (reproducible via eval_*.py and analysis_*.py)
 eval_results_*
 fadiff_self_consistency.csv
+analysis_logits_ranking.csv
+analysis_logits_ranking.json
 
 # LaTeX build artifacts
 *.aux
