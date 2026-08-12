@@ -97,7 +97,7 @@ python filter_designability.py -i data/ood/evodiff/scaffolds --min-pfold 0.5 --m
 uv run jupyter lab     # jupyterlab ставится dev-зависимостью при uv sync
 ```
 
-- `notebooks/01-kak-rabotaet.ipynb` — проход пайплайна по шагам: фронтенд, энкодер, головы, MC-Dropout, скоринг образцов из `data/`;
+- `notebooks/01-kak-rabotaet.ipynb` — проход пайплайна по шагам: фронтенд, энкодер, головы, MC-Dropout, скоринг образцов из `data/`; раздел 5 — атрибуция по признакам (Integrated Gradients, `explain_protein()`): для любого PDB показывает, какие из 31 узловых признаков и какие остатки сильнее всего понижают P(fold) относительно эталонной «хорошо сворачиваемой» структуры;
 - `notebooks/02-metriki-i-primery.ipynb` — метрики на test и выходах генераторов, распределения P(fold), лучшие/худшие примеры (нужны артефакты `eval_model.py` / `eval_generated.py`);
 - `notebooks/03-benchmark.ipynb` — живые замеры латентности против $M$ и длины.
 

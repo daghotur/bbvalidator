@@ -332,7 +332,7 @@ python filter_designability.py -i data/ood/evodiff/scaffolds --min-pfold 0.5 --m
 
 | Тетрадка | Содержание |
 |---|---|
-| `01-kak-rabotaet.ipynb` | проход пайплайна по шагам: фронтенд, головы, MC-Dropout, скоринг образцов |
+| `01-kak-rabotaet.ipynb` | проход пайплайна по шагам: фронтенд, головы, MC-Dropout, скоринг образцов, атрибуция признаков (Integrated Gradients) — какие именно признаки и остатки понижают P(fold) у конкретного белка |
 | `02-metriki-i-primery.ipynb` | метрики на test, распределения P(fold) по генераторам, лучшие/худшие примеры |
 | `03-benchmark.ipynb` | живые замеры латентности против $M$ и длины |
 
