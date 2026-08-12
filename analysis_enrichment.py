@@ -31,7 +31,11 @@ import torch
 from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, MODELS, parse_pdb_files
 from eval_model import build_eval_model
 
-MODELS_EXT = {**MODELS, "soft": "checkpoints/soft_model.pth"}
+MODELS_EXT = {
+    **MODELS,
+    "soft": "checkpoints/soft_model.pth",
+    "soft_mt": "checkpoints/soft_model_mt.pth",
+}
 
 DESIGNABLE_MAX_SCRMSD = 2.0
 Q_GRID = [0.01, 0.05, 0.10, 0.20, 0.30, 0.50]
@@ -213,11 +217,12 @@ def main():
     # направление: False = выше скор → дизайнуемее; бейзлайны крутим в обе стороны
     directions = {}
     for k in scorer_cols:
-        if k.startswith(("fold_logit", "pfold_mc")):
+        if k.startswith("fold_logit_soft"):
+            directions[k] = [True]           # soft: меньше предсказанный scRMSD = дизайнируемее
+        elif k.startswith(("fold_logit", "pfold_mc")):
             directions[k] = [False]          # больше = лучше
         else:                                # rmsd_head, p_steric, uncertainty: меньше = лучше
             directions[k] = [True]
-    directions["fold_logit_soft"] = [True]   # soft: меньше предсказанный scRMSD = дизайнируемее
     directions["clash_pairs"] = [True, False]
     directions["length"] = [True, False]
 
@@ -284,7 +289,7 @@ def main():
         for g in GENERATOR_DIRS
     }
     print("\n===== Критерий: обогащение >= 2× и выше наивного бейзлайна =====")
-    for primary_name in ["fold_logit_hybrid", "fold_logit_soft"]:
+    for primary_name in ["fold_logit_hybrid", "fold_logit_soft", "fold_logit_soft_mt"]:
         primary = results.get(primary_name, {})
         passed = 0
         for g in GENERATOR_DIRS:
