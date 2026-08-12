@@ -40,6 +40,8 @@ eval_results_*
 fadiff_self_consistency.csv
 analysis_logits_ranking.csv
 analysis_logits_ranking.json
+analysis_enrichment.csv
+analysis_enrichment.json
 
 # LaTeX build artifacts
 *.aux
