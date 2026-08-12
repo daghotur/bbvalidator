@@ -18,8 +18,6 @@ FAILURE_MODE_MAP = {
     "hard_core_unpacked": 2,
     "hard_false_compact": 2,
     "hard_near_native": 3,
-    "borderline_hinge_defect": 4,
-    "borderline_local_fragment_rotation": 4,
     "unknown_negative": 5,
 }
 
@@ -200,48 +198,6 @@ def make_hard_near_native(
     return c.astype(np.float32), "hard_near_native"
 
 
-# ── borderline negatives (30 %) ───────────────────────────────────────────────
-
-
-def make_borderline_hinge(
-    coords: np.ndarray,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, str]:
-    c = coords.copy().astype(np.float32)
-    pivot_idx = int(rng.integers(10, len(c) - 10))
-    rot = _rotation_matrix(rng, angle_deg=float(rng.uniform(8.0, 22.0)))
-    pivot_point = c[pivot_idx, 1, :].copy()
-
-    tail = (c[pivot_idx:] - pivot_point).reshape(-1, 3) @ rot.T
-    c[pivot_idx:] = tail.reshape(c[pivot_idx:].shape) + pivot_point
-    return c.astype(np.float32), "borderline_hinge_defect"
-
-
-def make_borderline_local_fragment_rotation(
-    coords: np.ndarray,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, str]:
-    c = coords.copy().astype(np.float32)
-    n = len(c)
-    window = int(rng.integers(3, 9))
-    if n <= window + 2:
-        return make_borderline_hinge(coords, rng)
-
-    start = int(rng.integers(1, n - window - 1))
-    end = start + window
-
-    axis = c[end - 1, 1, :] - c[start, 1, :]
-    axis_norm = np.linalg.norm(axis)
-    axis = _random_unit_vector(rng) if axis_norm < 1e-6 else axis / axis_norm
-
-    pivot = c[start:end, 1, :].mean(axis=0)
-    rot = _rotation_matrix(rng, axis=axis, angle_deg=float(rng.uniform(6.0, 18.0)))
-
-    frag = (c[start:end] - pivot).reshape(-1, 3) @ rot.T
-    c[start:end] = frag.reshape(c[start:end].shape) + pivot
-    return c.astype(np.float32), "borderline_local_fragment_rotation"
-
-
 # ── strategy dispatcher ───────────────────────────────────────────────────────
 
 
@@ -249,22 +205,18 @@ def apply_decoy_strategy(
     coords: np.ndarray,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, str]:
+    # Смесь easy : hard = 2 : 5.
     p = rng.random()
 
-    if p < 0.20:
+    if p < 2 / 7:
         return make_easy_negative(coords, rng)
 
-    if p < 0.70:
-        sub_p = rng.random()
-        if sub_p < 1 / 3:
-            return make_hard_unpacking(coords, rng)
-        if sub_p < 2 / 3:
-            return make_hard_compact_wrong_topology(coords, rng)
-        return make_hard_near_native(coords, rng)
-
-    if rng.random() > 0.5:
-        return make_borderline_hinge(coords, rng)
-    return make_borderline_local_fragment_rotation(coords, rng)
+    sub_p = rng.random()
+    if sub_p < 1 / 3:
+        return make_hard_unpacking(coords, rng)
+    if sub_p < 2 / 3:
+        return make_hard_compact_wrong_topology(coords, rng)
+    return make_hard_near_native(coords, rng)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────

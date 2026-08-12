@@ -17,6 +17,13 @@ TRAIN_FRAC = 0.70
 VAL_FRAC = 0.15
 # TEST_FRAC вычисляется как остаток: 1 - TRAIN_FRAC - VAL_FRAC
 
+# Исключаемые из датасета стратегии (их образцы остаются в h5, но не
+# попадают в манифест и сплиты).
+EXCLUDE_STRATEGIES = {
+    "borderline_hinge_defect",
+    "borderline_local_fragment_rotation",
+}
+
 
 def _safe_attr(attrs, key, default=None):
     if key not in attrs:
@@ -116,6 +123,13 @@ def build_manifest(pos_h5_path: str, neg_h5_path: str) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
         raise ValueError("Manifest is empty: no valid samples found in input H5 files.")
+    if EXCLUDE_STRATEGIES:
+        before = len(df)
+        df = df[~df["strategy"].isin(EXCLUDE_STRATEGIES)].reset_index(drop=True)
+        print(
+            f"Исключены стратегии {sorted(EXCLUDE_STRATEGIES)}: "
+            f"{before - len(df)} образцов"
+        )
     return df
 
 
