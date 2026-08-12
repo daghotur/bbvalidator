@@ -1,10 +1,10 @@
 {
-  "total_samples": 425178,
+  "total_samples": 340390,
   "total_groups": 141726,
   "samples_by_split": {
-    "train": 297624,
-    "test": 63780,
-    "val": 63774
+    "train": 238110,
+    "val": 51206,
+    "test": 51074
   },
   "groups_by_split": {
     "test": 21260,
@@ -13,22 +13,20 @@
   },
   "labels_by_split": {
     "test": {
-      "0": 42520,
+      "0": 29814,
       "1": 21260
     },
     "train": {
-      "0": 198416,
+      "0": 138902,
       "1": 99208
     },
     "val": {
-      "0": 42516,
+      "0": 29948,
       "1": 21258
     }
   },
   "strategies_by_split": {
     "test": {
-      "borderline_hinge_defect": 6322,
-      "borderline_local_fragment_rotation": 6384,
       "easy_chain_break": 4288,
       "easy_global_noise": 4226,
       "hard_core_unpacked": 7135,
@@ -37,8 +35,6 @@
       "positive_real": 21260
     },
     "train": {
-      "borderline_hinge_defect": 29762,
-      "borderline_local_fragment_rotation": 29752,
       "easy_chain_break": 19988,
       "easy_global_noise": 19914,
       "hard_core_unpacked": 33907,
@@ -47,8 +43,6 @@
       "positive_real": 99208
     },
     "val": {
-      "borderline_hinge_defect": 6272,
-      "borderline_local_fragment_rotation": 6296,
       "easy_chain_break": 4234,
       "easy_global_noise": 4251,
       "hard_core_unpacked": 7217,
@@ -59,9 +53,9 @@
   },
   "length_stats_by_split": {
     "test": {
-      "count": 63780.0,
-      "mean": 231.195,
-      "std": 122.766,
+      "count": 51074.0,
+      "mean": 231.113,
+      "std": 122.864,
       "min": 50.0,
       "25%": 131.0,
       "50%": 209.0,
@@ -69,9 +63,9 @@
       "max": 697.0
     },
     "train": {
-      "count": 297624.0,
-      "mean": 230.038,
-      "std": 121.975,
+      "count": 238110.0,
+      "mean": 229.795,
+      "std": 121.963,
       "min": 50.0,
       "25%": 131.0,
       "50%": 209.0,
@@ -79,9 +73,9 @@
       "max": 698.0
     },
     "val": {
-      "count": 63774.0,
-      "mean": 229.623,
-      "std": 122.515,
+      "count": 51206.0,
+      "mean": 229.601,
+      "std": 122.628,
       "min": 50.0,
       "25%": 130.0,
       "50%": 208.0,
