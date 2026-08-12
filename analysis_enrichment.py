@@ -31,6 +31,8 @@ import torch
 from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, MODELS, parse_pdb_files
 from eval_model import build_eval_model
 
+MODELS_EXT = {**MODELS, "soft": "checkpoints/soft_model.pth"}
+
 DESIGNABLE_MAX_SCRMSD = 2.0
 Q_GRID = [0.01, 0.05, 0.10, 0.20, 0.30, 0.50]
 DETAIL_CSV = "eval_results_generated_detail.csv"
@@ -144,9 +146,9 @@ def main():
     print("Геометрия: clash_pairs...")
     clash_pairs = geometry_clashes(all_records, device)
 
-    # 3. Детерминированные головы трёх моделей
+    # 3. Детерминированные головы моделей (включая soft — дообучение на log1p(scRMSD))
     scorer_cols = {}
-    for model_name, ckpt in MODELS.items():
+    for model_name, ckpt in MODELS_EXT.items():
         print(f"Модель: {model_name}...")
         model, _ = build_eval_model(ckpt, device, pca_path="dataset/pca_components.pth")
         model.eval()
@@ -163,7 +165,7 @@ def main():
         (r["motif"], r["sample"].removesuffix(".pdb"), g)
         for r, g in zip(all_records, group_of)
     ]
-    for model_name in MODELS:
+    for model_name in [m for m in MODELS_EXT if m in set(detail["model"])]:
         m = detail["model"] == model_name
         sub = detail[m]
         sub_index = {
@@ -215,6 +217,7 @@ def main():
             directions[k] = [False]          # больше = лучше
         else:                                # rmsd_head, p_steric, uncertainty: меньше = лучше
             directions[k] = [True]
+    directions["fold_logit_soft"] = [True]   # soft: меньше предсказанный scRMSD = дизайнируемее
     directions["clash_pairs"] = [True, False]
     directions["length"] = [True, False]
 
@@ -272,23 +275,25 @@ def main():
         row += f"{res['pooled'][qk]['enrichment']:>10.2f}"
         print(row)
 
-    # 8. Критерий прохождения шага 2
-    print("\n===== Критерий шага 2 =====")
-    primary = results.get("fold_logit_hybrid", {})
-    passed = 0
-    best_naive = {}
-    for g in GENERATOR_DIRS:
-        e_primary = primary.get("per_generator", {}).get(g, {}).get(qk, {}).get("enrichment", float("nan"))
-        naive = {
-            n: results[n]["per_generator"].get(g, {}).get(qk, {}).get("enrichment", float("nan"))
+    # 8. Критерий прохождения: бинарная модель vs soft-дообучение
+    naive_best = {
+        g: max(
+            results[n]["per_generator"].get(g, {}).get(qk, {}).get("enrichment", float("nan"))
             for n in ["clash_pairs", "length", "random"]
-        }
-        best_naive[g] = max(naive.values())
-        ok = e_primary >= 2.0 and e_primary > best_naive[g]
-        passed += int(ok)
-        print(f"  {g}: fold_logit_hybrid {e_primary:.2f}× vs лучший наивный "
-              f"{best_naive[g]:.2f}× → {'PASS' if ok else 'FAIL'}")
-    print(f"Итог: {passed}/5 генераторов (нужно >= 3 с обогащением >= 2× и выше наивного бейзлайна)")
+        )
+        for g in GENERATOR_DIRS
+    }
+    print("\n===== Критерий: обогащение >= 2× и выше наивного бейзлайна =====")
+    for primary_name in ["fold_logit_hybrid", "fold_logit_soft"]:
+        primary = results.get(primary_name, {})
+        passed = 0
+        for g in GENERATOR_DIRS:
+            e = primary.get("per_generator", {}).get(g, {}).get(qk, {}).get("enrichment", float("nan"))
+            ok = e >= 2.0 and e > naive_best[g]
+            passed += int(ok)
+            print(f"  [{primary_name}] {g}: {e:.2f}× vs наивный {naive_best[g]:.2f}× → "
+                  f"{'PASS' if ok else 'FAIL'}")
+        print(f"  [{primary_name}] итог: {passed}/5 генераторов")
     print(f"\nСохранено: {os.path.abspath(OUT_CSV)}, {os.path.abspath(OUT_JSON)}")
 
 
