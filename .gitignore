@@ -44,6 +44,8 @@ analysis_logits_ranking.csv
 analysis_logits_ranking.json
 analysis_enrichment.csv
 analysis_enrichment.json
+analysis_motif_bias.json
+motif_breakdown_*.csv
 
 # LaTeX build artifacts
 *.aux
