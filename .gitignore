@@ -27,6 +27,9 @@ checkpoints/*
 !checkpoints/soft_model_mt.pth
 !checkpoints/joint_model.pth
 dataset/latest/
+# PCA-проекция фрагментов (4.9 КБ): без неё freeze_pca() не вызывается
+# и проекция остаётся обучаемой при дообучении с чистого клона
+!dataset/pca_components.pth
 
 # Downloaded external datasets (MotifBench outputs and evaluations)
 data/ood/
