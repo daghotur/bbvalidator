@@ -7,6 +7,27 @@ import torch.nn.functional as F
 # Multi-Head Attention Pooling
 # ---------------------------------------------------------------------------
 class MultiHeadAttentionPooling(nn.Module):
+    """Пулинг по остаткам через обучаемое внимание.
+
+    Измеренное свойство (Scaffold-Lab, длины 50-1000, 2026-08-13): обученные
+    веса внимания отклоняются от равномерных всего на ±10%, десять процентов
+    остатков несут ровно десять процентов массы, энтропия 0.9997-1.0000 от
+    максимальной. То есть модуль фактически считает СРЕДНЕЕ на любой длине,
+    а не выделяет остатки.
+
+    Это выглядит проблемой: scRMSD определяется худшим участком, а усреднение
+    такого выразить не может. Попытка добавить ветку max/min по остаткам
+    (2026-08-13) результата не дала: веса ветки остались на уровне инициализации,
+    абляция меняла абсолютную шкалу, но не порядок (Spearman «с веткой» против
+    «без» = 0.9953), а парное сравнение по мотивам показало значимое ухудшение
+    на RFdiffusion. Ветка убрана; разбор — docs/05, раздел 5.9.
+
+    Гипотеза не опровергнута — опровергнут конкретный способ: покомпонентный
+    максимум по d_model не выделяет «худший остаток», потому что максимум
+    каждого измерения может приходиться на свой. Осмысленная следующая попытка —
+    учить скалярную оценку качества на остаток и пулить top-k по ней.
+    """
+
     def __init__(self, d_model: int, num_heads: int = 4):
         super().__init__()
         self.num_heads = num_heads
@@ -50,6 +71,24 @@ class MLPHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+class PerResidueHead(nn.Module):
+    """По-остаточная голова: работает по узловым представлениям [B, N, d], а не по
+    пулингу, поэтому выдаёт вектор длины L вместо одного скаляра на структуру.
+
+    Таргет — CA-lDDT остова против ESMFold-рефолда его дизайненной
+    последовательности (build_lddt_labels.py): «воспроизводится ли локальное
+    окружение остатка i, когда последовательность реально сворачивают».
+    Выход в логитах; сигмоида применяется в лоссе/инференсе.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.15):
+        super().__init__()
+        self.net = MLPHead(d_model, 1, dropout)
+
+    def forward(self, node_repr: torch.Tensor) -> torch.Tensor:
+        return self.net(node_repr).squeeze(-1)  # [B, N]
 
 
 class ProteinMultiTaskHeads(nn.Module):
@@ -158,12 +197,14 @@ class DynamicMultiTaskLoss(nn.Module):
 # Сборка модели
 # ---------------------------------------------------------------------------
 class ProteinScoreModel(nn.Module):
-    def __init__(self, frontend, encoder, pooler, heads):
+    def __init__(self, frontend, encoder, pooler, heads, per_residue_head=None):
         super().__init__()
         self.frontend = frontend
         self.encoder = encoder
         self.pooler = pooler
         self.heads = heads
+        # Опциональна: чекпоинты без неё грузятся как раньше (см. build_model).
+        self.per_residue_head = per_residue_head
 
     def compute_features(
             self, coords: torch.Tensor, mask: torch.Tensor
@@ -172,20 +213,23 @@ class ProteinScoreModel(nn.Module):
 
     def encode_features(
             self, features: dict
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Граф + трансформер + пулинг. Повторяется mc_runs раз при MC-Dropout."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Граф + трансформер + пулинг. Повторяется mc_runs раз при MC-Dropout.
+        Возвращает (пулинг, веса внимания, узловые представления)."""
         node_encoded = self.encoder(features)
         protein_repr, attn_weights = self.pooler(node_encoded, features["mask"])
-        return protein_repr, attn_weights
+        return protein_repr, attn_weights, node_encoded
 
     def predict_from_repr(self, protein_repr: torch.Tensor) -> dict:
         return self.heads(protein_repr)
 
     def forward(self, coords: torch.Tensor, mask: torch.Tensor) -> dict:
         features = self.compute_features(coords, mask)
-        protein_repr, attn_weights = self.encode_features(features)
+        protein_repr, attn_weights, node_encoded = self.encode_features(features)
         preds = self.predict_from_repr(protein_repr)
         preds["attn_weights"] = attn_weights
+        if self.per_residue_head is not None:
+            preds["lddt_logit"] = self.per_residue_head(node_encoded)  # [B, N]
         return preds
 
 
@@ -239,7 +283,7 @@ def predict_with_uncertainty(
 
     try:
         for _ in range(mc_runs):
-            protein_repr, _ = model.encode_features(features)
+            protein_repr, _, _ = model.encode_features(features)
             preds = model.predict_from_repr(protein_repr)
             probs.append(torch.sigmoid(preds["fold_logit"]))  # [B]
 

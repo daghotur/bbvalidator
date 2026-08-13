@@ -80,44 +80,20 @@ class BaselineGPSEncoder(nn.Module):
     def forward(self, features: dict) -> torch.Tensor:
         x_raw = features["node_feats"]  # [B, N, node_in_dim]
         mask = features["mask"]
-        edge_indices = features["edge_indices"]
-        edge_attrs = features["edge_attrs"]
+        e_idx = features["edge_index"]  # [2, E] — упакованная нумерация
+        e_attr = features["edge_attr"]  # [E, pair_in_dim]
 
         B, N, _ = x_raw.shape
         device = x_raw.device
 
         x = self.node_proj(x_raw)
 
-        # Упаковка: убираем паддинг, стыкуем графы батча в один (как в гибриде)
-        packed_nodes = []
-        batch_ids = []
-        global_edge_indices = []
-        global_edge_attrs = []
-        offset = 0
-
-        for b in range(B):
-            valid_x = x[b][mask[b]]
-            nb = valid_x.size(0)
-            packed_nodes.append(valid_x)
-            batch_ids.append(torch.full((nb,), b, dtype=torch.long, device=device))
-
-            if edge_indices[b].numel() > 0:
-                global_edge_indices.append(edge_indices[b] + offset)
-                global_edge_attrs.append(edge_attrs[b])
-
-            offset += nb
-
-        x_packed = torch.cat(packed_nodes, dim=0)
-        batch_vec = torch.cat(batch_ids, dim=0)
-
-        if len(global_edge_indices) > 0:
-            e_idx = torch.cat(global_edge_indices, dim=1)
-            e_attr = torch.cat(global_edge_attrs, dim=0)
-        else:
-            e_idx = torch.zeros((2, 0), dtype=torch.long, device=device)
-            e_attr = torch.zeros(
-                (0, self.pair_in_dim), device=device, dtype=x_packed.dtype
-            )
+        # Упаковка: убираем паддинг, стыкуем графы батча в один (как в гибриде).
+        # x[mask] даёт ту же нумерацию, в которой фронтенд выдал рёбра.
+        x_packed = x[mask]
+        batch_vec = (
+            torch.arange(B, device=device).unsqueeze(1).expand(B, N)[mask]
+        )
 
         for layer in self.gps_layers:
             x_packed = layer(x_packed, edge_index=e_idx, batch=batch_vec, edge_attr=e_attr)

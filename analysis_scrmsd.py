@@ -6,7 +6,9 @@ analysis_scrmsd.py
 
 MotifBench для каждого скаффолда дизайнит 8 последовательностей (ProteinMPNN),
 рефолдит их ESMFold и считает RMSD/TM-score рефолда против скаффолда.
-scRMSD/scTM скаффолда = среднее по 8 последовательностям.
+
+Здесь же живёт SCRMSD_AGG — единая точка определения метки скаффолда для
+всего проекта (обучение, анализы, фильтр).
 
 Запуск:  python analysis_scrmsd.py
 """
@@ -30,9 +32,22 @@ DETAIL_CSV = "eval_results_generated_detail.csv"
 OUT_JSON = "eval_results_scrmsd.json"
 FIG_DIR = "figures"
 
+# Агрегатор per-sequence RMSD в метку скаффолда — ЕДИНЫЙ для всего проекта.
+# Спецификация MotifBench (docs/07) и постановка скрининга требуют min: остов
+# проходит дорогой фильтр, если свернулась ХОТЬ ОДНА из восьми последовательностей.
+# До 2026-08-13 везде стоял mean — величина, которой нет ни в бенчмарке, ни в
+# постановке: при бимодальном распределении RMSD она измеряет долю удачных
+# последовательностей, а не дизайнируемость остова. Обоснование замены и цена
+# перехода — analysis_label_choice.py.
+SCRMSD_AGG = "min"
 
-def parse_motifbench_eval(root: str) -> pd.DataFrame:
-    """Собирает per-scaffold scRMSD/scTM из всех esm_eval_results.csv."""
+
+def parse_motifbench_eval(root: str, agg: str = SCRMSD_AGG) -> pd.DataFrame:
+    """Собирает per-scaffold scRMSD/scTM из всех esm_eval_results.csv.
+
+    scRMSD агрегируется по agg (см. SCRMSD_AGG); scTM — согласованно с ним,
+    то есть берётся у лучшей последовательности, а не усредняется.
+    """
     rows = []
     for csv_path in glob.glob(os.path.join(root, "**", "esm_eval_results.csv"), recursive=True):
         if "__MACOSX" in csv_path:
@@ -47,16 +62,23 @@ def parse_motifbench_eval(root: str) -> pd.DataFrame:
             continue
         if "rmsd" not in df.columns or "tm_score" not in df.columns:
             continue
-        rmsd = pd.to_numeric(df["rmsd"], errors="coerce").dropna()
-        tm = pd.to_numeric(df["tm_score"], errors="coerce").dropna()
-        if len(rmsd) == 0:
+        rmsd = pd.to_numeric(df["rmsd"], errors="coerce")
+        tm = pd.to_numeric(df["tm_score"], errors="coerce")
+        ok = rmsd.notna()
+        if not ok.any():
             continue
+        rmsd, tm = rmsd[ok], tm[ok]
+        if agg == "min":
+            best = rmsd.idxmin()
+            sc_rmsd, sc_tm = float(rmsd.loc[best]), float(tm.loc[best])
+        else:
+            sc_rmsd, sc_tm = float(rmsd.mean()), float(tm.mean())
         rows.append(
             {
                 "motif": motif,
                 "sample": sample,
-                "sc_rmsd": float(rmsd.mean()),
-                "sc_tm": float(tm.mean()),
+                "sc_rmsd": sc_rmsd,
+                "sc_tm": sc_tm,
                 "n_seqs": int(len(rmsd)),
             }
         )

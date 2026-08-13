@@ -29,9 +29,14 @@ class BiophysicalFrontend(nn.Module):
             geom_raw = self.geometry(coords, mask)
             fold_raw = self.designability(ca, mask, dist_mat=dist_mat)
 
-            # 2. Пары и граф
+            # 2. Пары и граф. Виртуальный Cβ и N нужны для ориентационных
+            #    признаков рёбер — Cβ уже посчитан внутри geometry, не дублируем.
             pair_data = self.pair_builder(
-                ca, mask, dist_mat=dist_mat
+                ca,
+                mask,
+                dist_mat=dist_mat,
+                cb_coords=geom_raw["virtual_cb"],
+                n_coords=coords[:, :, 0, :],
             )
 
             # 3. Узловые признаки
@@ -42,7 +47,9 @@ class BiophysicalFrontend(nn.Module):
 
             return {
                 "node_feats": node_feats,  # [B, N, F_node]
-                "edge_indices": pair_data["edge_indices"],  # List[Tensor(2, E)]
-                "edge_attrs": pair_data["edge_attrs"],  # List[Tensor(E, F_pair)]
+                # рёбра уже в упакованной нумерации (см. PairFeatureBuilder)
+                "edge_index": pair_data["edge_index"],  # [2, E]
+                "edge_attr": pair_data["edge_attr"],  # [E, F_pair]
+                "n_valid": pair_data["n_valid"],
                 "mask": mask,
             }

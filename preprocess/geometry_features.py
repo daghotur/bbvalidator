@@ -154,6 +154,9 @@ class BackboneGeometryExtractor(nn.Module):
         ca_dist, ca_mask = self._pad_right_and_mask(ca_dist_raw, N)
 
         return {
+            # Виртуальный Cβ отдаётся наружу: на нём строятся ориентационные
+            # признаки рёбер (PairFeatureBuilder). В pack_for_mlp не входит.
+            "virtual_cb": virtual_cb,
             "phi": phi,
             "psi": psi,
             "omega": omega,

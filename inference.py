@@ -2,6 +2,7 @@ import os
 import argparse
 import numpy as np
 import torch
+import torch.nn as nn
 import biotite.structure as struc
 import biotite.structure.io.pdb as pdb
 import contextlib
@@ -12,6 +13,7 @@ from preprocess.fit_pca import load_pca_into_frontend
 from model.encoder import HybridProteinEncoder
 from model.heads_loss import (
     MultiHeadAttentionPooling,
+    PerResidueHead,
     ProteinMultiTaskHeads,
     ProteinScoreModel,
     predict_with_uncertainty
@@ -72,12 +74,75 @@ def remap_legacy_foldability_keys(state_dict: dict) -> dict:
     }
 
 
-def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dataset/pca_components.pth") -> ProteinScoreModel:
+def expand_linear_inputs(
+    state_dict: dict, model: nn.Module, pair_init: str = "zero"
+) -> dict:
+    """Дополняет входы линейных слоёв, у которых выросла размерность входа.
+
+    Сейчас такое расширение одно: `encoder.pair_embed.0` — 20 → 29, к признакам
+    рёбер добавлены ориентационные (набор trRosetta, docs/05 раздел 5.8). Новые
+    входы дописываются В КОНЕЦ конкатенации, поэтому старые веса остаются на
+    своих местах и чекпоинты остаются загружаемыми.
+
+    Функция оставлена обобщённой намеренно: расширение входа — повторяющийся
+    сценарий при правках признаков, и добавление слоя сюда дешевле, чем
+    написание отдельного обработчика.
+
+    pair_init="zero"   — новые входы зануляются: модель сразу после загрузки
+                         считает ровно то же, что и раньше. Режим для инференса
+                         и воспроизведения старых чисел.
+    pair_init="scaled" — новые входы инициализируются в масштабе слоя. Режим
+                         для дообучения: при нулевом старте поверх уже
+                         сошедшейся сети новые входы остаются мёртвыми (замер:
+                         после 45 эпох норма ориентационных весов была 0.15
+                         против 5.97 у остальных, зеркальный тест не сдвинулся),
+                         потому что давления их включать нет.
+    """
+    targets = {
+        "encoder.pair_embed.0.weight": model.encoder.pair_embed[0].weight.shape,
+    }
+    state_dict = dict(state_dict)
+    for key, want in targets.items():
+        if key not in state_dict:
+            continue
+        have = state_dict[key].shape
+        if have == want:
+            continue
+        if have[0] != want[0] or have[1] > want[1]:
+            raise RuntimeError(
+                f"Несовместимая форма {key}: в чекпоинте {tuple(have)}, "
+                f"ожидается {tuple(want)}"
+            )
+        if pair_init == "zero":
+            padded = torch.zeros(want, dtype=state_dict[key].dtype)
+            note = "нулями (поведение не меняется)"
+        elif pair_init == "scaled":
+            bound = 1.0 / (want[1] ** 0.5)
+            padded = torch.empty(want, dtype=state_dict[key].dtype).uniform_(-bound, bound)
+            note = f"в масштабе слоя ±{bound:.3f} (для дообучения)"
+        else:
+            raise ValueError(
+                f"pair_init: ожидается 'zero' или 'scaled', получено {pair_init!r}"
+            )
+        padded[:, : have[1]] = state_dict[key]
+        state_dict[key] = padded
+        print(f"{key}: вход расширен {have[1]} → {want[1]}, новые входы {note}.")
+    return state_dict
+
+
+def build_model(
+    checkpoint_path: str,
+    device: torch.device,
+    pca_path: str = "dataset/pca_components.pth",
+    per_residue: bool = False,
+    pair_init: str = "zero",
+) -> ProteinScoreModel:
     d_model = 192
     frontend = BiophysicalFrontend(use_no_grad=True)
     encoder = HybridProteinEncoder(
         node_in_dim=31,
-        pair_in_dim=20,
+        # берём у фронтенда, чтобы размерности не разъезжались при правках признаков
+        pair_in_dim=frontend.pair_builder.feature_dim,
         d_model=d_model,
         pair_dim=64,
         num_graph_layers=2,
@@ -87,8 +152,9 @@ def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dat
     )
     pooler = MultiHeadAttentionPooling(d_model=d_model, num_heads=4)
     heads = ProteinMultiTaskHeads(d_model=d_model, dropout=0.15)
+    per_residue_head = PerResidueHead(d_model=d_model, dropout=0.15) if per_residue else None
 
-    model = ProteinScoreModel(frontend, encoder, pooler, heads)
+    model = ProteinScoreModel(frontend, encoder, pooler, heads, per_residue_head)
 
     print(f"Загрузка весов из {checkpoint_path}...")
     # weights_only=True защищает от исполнения произвольного кода при загрузке
@@ -98,8 +164,19 @@ def build_model(checkpoint_path: str, device: torch.device, pca_path: str = "dat
     # Обработка ключа model_state_dict (как мы сохраняли в train_model.py)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
     state_dict = remap_legacy_foldability_keys(state_dict)
+    state_dict = expand_linear_inputs(state_dict, model, pair_init)
     try:
-        model.load_state_dict(state_dict)
+        if per_residue and not any(k.startswith("per_residue_head.") for k in state_dict):
+            # Дообучение поверх чекпоинта без по-остаточной головы: она новая,
+            # инициализируется с нуля. Всё остальное обязано совпасть.
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            unexpected = [k for k in unexpected]
+            missing = [k for k in missing if not k.startswith("per_residue_head.")]
+            if missing or unexpected:
+                raise RuntimeError(f"несовпадение ключей: {missing[:5]} / {unexpected[:5]}")
+            print("По-остаточная голова инициализирована с нуля (в чекпоинте её нет).")
+        else:
+            model.load_state_dict(state_dict)
     except RuntimeError as e:
         raise RuntimeError(
             "Чекпоинт несовместим с текущей архитектурой. Чекпоинты до "

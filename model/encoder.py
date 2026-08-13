@@ -5,8 +5,10 @@ HybridProteinEncoder: Graph message-passing (MPNN) → Pre-LayerNorm Transformer
 
 Входной контракт (dict от BiophysicalFrontend):
   node_feats     : [B, N, node_in_dim]
-  edge_indices   : List[Tensor(2, E_b)]        — kNN-рёбра на граф в батче
-  edge_attrs     : List[Tensor(E_b, pair_in_dim)] — признаки рёбер (RBF + seq)
+  edge_index     : [2, E]  — kNN-рёбра всего батча в упакованной нумерации
+                             (валидные узлы всех образцов подряд, как x[mask])
+  edge_attr      : [E, pair_in_dim] — признаки рёбер (RBF + seq)
+  n_valid        : int — число валидных узлов в батче
   mask           : [B, N]  bool — True = валидный остаток, False = паддинг
 
 Выход: node embeddings [B, N, d_model]
@@ -125,8 +127,8 @@ class HybridProteinEncoder(nn.Module):
     def forward(self, features: dict) -> torch.Tensor:
         x_raw = features["node_feats"]  # [B, N, node_in_dim]
         mask = features["mask"]  # [B, N] bool
-        edge_indices = features["edge_indices"]  # List[Tensor(2, E_b)]
-        edge_attrs = features["edge_attrs"]  # List[Tensor(E_b, pair_in_dim)]
+        e_idx = features["edge_index"]  # [2, E] — уже в упакованной нумерации
+        e_attr = features["edge_attr"]  # [E, pair_in_dim]
 
         B, N, _ = x_raw.shape
         device = x_raw.device
@@ -134,38 +136,25 @@ class HybridProteinEncoder(nn.Module):
         # 1. Проекция узлов
         x = self.node_embed(x_raw)  # [B, N, d_model]
 
-        # 2. Упаковка графа (убираем паддинг для MPNN)
-        packed_nodes = []
-        global_edge_indices = []
-        global_edge_attrs = []
-        offset = 0
-
-        for b in range(B):
-            # Берем только валидные узлы из текущего графа в батче
-            valid_x = x[b][mask[b]]  # [nb, d_model]
-            nb = valid_x.size(0)
-            packed_nodes.append(valid_x)
-
-            if edge_indices[b].numel() > 0:
-                # Смещаем индексы графа на текущий offset (так как сплющиваем все в 1 массив)
-                global_edge_indices.append(edge_indices[b] + offset)
-                global_edge_attrs.append(edge_attrs[b])
-
-            offset += nb
-
-        x_packed = torch.cat(packed_nodes, dim=0)  # [Total_valid_nodes, d_model]
+        # 2. Упаковка графа: x[mask] даёт валидные узлы всех образцов подряд
+        #    в row-major порядке — ровно та нумерация, в которой PairFeatureBuilder
+        #    выдал рёбра, поэтому сшивать по образцам больше не нужно.
+        x_packed = x[mask]  # [Total_valid_nodes, d_model]
 
         # 3. Графовые слои
-        if len(global_edge_indices) > 0:
-            e_idx = torch.cat(global_edge_indices, dim=1)  # [2, Total_edges]
-            e_attr = torch.cat(global_edge_attrs, dim=0)  # [Total_edges, pair_in_dim]
-
+        if e_idx.numel() > 0:
             # Проецируем пары только один раз (для валидных ребер)
             e_attr = self.pair_embed(e_attr)
 
             for layer in self.graph_layers:
-                # Используем gradient checkpointing для жесткой экономии памяти
-                x_packed = checkpoint(layer, x_packed, e_idx, e_attr, use_reentrant=False)
+                if self.training:
+                    # Gradient checkpointing — только на обучении: на инференсе
+                    # он не экономит ничего, а обёртка стоит времени.
+                    x_packed = checkpoint(
+                        layer, x_packed, e_idx, e_attr, use_reentrant=False
+                    )
+                else:
+                    x_packed = layer(x_packed, e_idx, e_attr)
 
         # 4. Распаковка обратно в форму батча для Трансформера
         x_out = torch.zeros((B, N, x.size(-1)), device=device, dtype=x.dtype)

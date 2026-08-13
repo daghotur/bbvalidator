@@ -31,6 +31,7 @@ from model.heads_loss import (
 )
 from model.metrics import average_precision_score, roc_auc_score
 from preprocess.biophys_frontend import BiophysicalFrontend
+from preprocess.pair_features import PairFeatureBuilder
 from preprocess.fit_pca import load_pca_into_frontend
 
 SEED = 42
@@ -186,7 +187,8 @@ def main():
         "seed": SEED,
         "d_model": d_model,
         "node_in_dim": 31,
-        "pair_in_dim": 20,
+        # синхронизировано с PairFeatureBuilder.feature_dim (rbf+seq+ориентация)
+        "pair_in_dim": PairFeatureBuilder().feature_dim,
         "pair_dim": 64,
         "num_graph_layers": 2,
         "num_transformer_layers": 4,

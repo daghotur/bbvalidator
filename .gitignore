@@ -46,6 +46,19 @@ analysis_enrichment.csv
 analysis_enrichment.json
 analysis_motif_bias.json
 motif_breakdown_*.csv
+analysis_oracle_ceiling.json
+oracle_ceiling_*.csv
+analysis_label_choice.json
+analysis_relabel.json
+analysis_perresidue.json
+analysis_second_oracle.json
+second_oracle_*.csv
+analysis_baselines.json
+analysis_economics.json
+economics_per_motif.csv
+analysis_length_stress.json
+length_stress_per_sample.csv
+lddt_labels/
 
 # LaTeX build artifacts
 *.aux

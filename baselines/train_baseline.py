@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from preprocess.pair_features import PairFeatureBuilder
 
 import train_model as tm
 from baselines.encoders import BaselineGPSEncoder, BaselineMLPEncoder
@@ -46,7 +47,8 @@ def build_baseline(encoder_name: str, device: torch.device) -> ProteinScoreModel
         encoder = BaselineMLPEncoder(node_in_dim=31, d_model=D_MODEL, dropout=0.15)
     elif encoder_name == "gps":
         encoder = BaselineGPSEncoder(
-            node_in_dim=31, pair_in_dim=20, d_model=D_MODEL, heads=4,
+            node_in_dim=31, pair_in_dim=PairFeatureBuilder().feature_dim,
+            d_model=D_MODEL, heads=4,
             num_layers=2, dropout=0.15,
         )
     else:

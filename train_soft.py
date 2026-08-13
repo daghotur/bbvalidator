@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from analysis_logits_ranking import GENERATOR_DIRS, parse_pdb_files
+from analysis_scrmsd import SCRMSD_AGG
 from inference import build_model
 
 TRAIN_GENERATORS = ["RFdiffusion", "RFdiffusion-AA", "EvoDiff"]
@@ -45,14 +46,17 @@ VAL_FRACTION = 0.1
 SEED = 42
 
 
-def parse_scrmsd(root: str) -> dict:
-    """(motif, sample) -> средний rmsd по дизайнуемым секвенциям."""
+def parse_scrmsd(root: str, agg: str = SCRMSD_AGG) -> dict:
+    """(motif, sample) -> scRMSD скаффолда, агрегированный по 8 рефолдам."""
     import pandas as pd
 
     out = {}
     for f in glob.glob(os.path.join(root, "*", "*", "*", "self_consistency", "esm_eval_results.csv")):
         parts = f.split(os.sep)
-        out[(parts[-4], parts[-3])] = float(pd.read_csv(f)["rmsd"].mean())
+        v = pd.to_numeric(pd.read_csv(f)["rmsd"], errors="coerce").dropna()
+        if len(v) == 0:
+            continue
+        out[(parts[-4], parts[-3])] = float(v.min() if agg == "min" else v.mean())
     return out
 
 
@@ -109,7 +113,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Устройство: {device}")
 
-    model = build_model(CKPT, device, pca_path=PCA)
+    model = build_model(CKPT, device, pca_path=PCA, pair_init="scaled")
 
     # Данные: обучающие генераторы + train/val разбиение по скаффолдам
     train_records, train_ys = [], []
