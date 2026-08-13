@@ -25,6 +25,7 @@ checkpoints/*
 !checkpoints/best_model.pth
 !checkpoints/soft_model.pth
 !checkpoints/soft_model_mt.pth
+!checkpoints/joint_model.pth
 dataset/latest/
 
 # Downloaded external datasets (MotifBench outputs and evaluations)
