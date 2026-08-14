@@ -5,12 +5,17 @@ import h5py
 import numpy as np
 import pandas as pd
 
-POS_H5 = "positive_proteins.h5"
-NEG_H5 = "negative_proteins.h5"
+from dataset.sequence_clusters import download_clusters, entry_groups, homology_across_groups
 
-OUT_MANIFEST = "manifest_v1.csv"
-OUT_MANIFEST_SPLIT = "manifest_v1_split.csv"
-OUT_STATS = "split_stats_v1.json"
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+
+POS_H5 = os.path.join(DATA_DIR, "positive_proteins.h5")
+NEG_H5 = os.path.join(DATA_DIR, "negative_proteins.h5")
+CLUSTERS = os.path.join(DATA_DIR, "clusters-by-entity-30.txt")
+
+OUT_MANIFEST = os.path.join(DATA_DIR, "manifest_v1.csv")
+OUT_MANIFEST_SPLIT = os.path.join(DATA_DIR, "manifest_v1_split.csv")
+OUT_STATS = os.path.join(DATA_DIR, "split_stats_v1.json")
 
 RANDOM_SEED = 42
 TRAIN_FRAC = 0.70
@@ -118,11 +123,50 @@ def read_negative_manifest(neg_h5_path: str) -> list[dict]:
     return rows
 
 
-def build_manifest(pos_h5_path: str, neg_h5_path: str) -> pd.DataFrame:
+def assign_homology_groups(df: pd.DataFrame, clusters_path: str) -> pd.DataFrame:
+    """Переписывает group_id с цепи на группу гомологов (кластеры RCSB 30%).
+
+    Декои наследуют группу своего натива через parent_positive_key, поэтому
+    натив и все его деформации по-прежнему неразделимы; дополнительно вместе
+    едут все цепи, чья последовательность попадает в тот же кластер.
+    """
+    entry_to_group = entry_groups(download_clusters(clusters_path))
+
+    natives = df[df["label"] == 1]
+    entry_of_key = dict(
+        zip(natives["h5_group_key"], natives["pdb_id"].astype(str).str.upper())
+    )
+    # Запись вне файла кластеров (свежая, ещё не кластеризованная) — сама себе группа
+    group_of_key = {
+        key: entry_to_group.get(entry, f"entry::{entry}")
+        for key, entry in entry_of_key.items()
+    }
+
+    unknown = sum(1 for e in entry_of_key.values() if e not in entry_to_group)
+    df = df.copy()
+    df["group_id"] = df["parent_positive_key"].map(group_of_key)
+    missing = int(df["group_id"].isna().sum())
+    if missing:
+        raise ValueError(f"{missing} образцов без родительского натива в манифесте")
+
+    used = {k: v for k, v in group_of_key.items()}
+    risky = homology_across_groups(
+        {entry_of_key[k]: v for k, v in used.items()}, clusters_path
+    )
+    print(
+        f"Группы гомологов: {df['group_id'].nunique():,} "
+        f"(цепей {len(natives):,}, записей вне кластеров {unknown:,}); "
+        f"верхняя оценка остаточной гомологии между группами {risky:.1%}"
+    )
+    return df
+
+
+def build_manifest(pos_h5_path: str, neg_h5_path: str, clusters_path: str) -> pd.DataFrame:
     rows = read_positive_manifest(pos_h5_path) + read_negative_manifest(neg_h5_path)
     df = pd.DataFrame(rows)
     if df.empty:
         raise ValueError("Manifest is empty: no valid samples found in input H5 files.")
+    df = assign_homology_groups(df, clusters_path)
     if EXCLUDE_STRATEGIES:
         before = len(df)
         df = df[~df["strategy"].isin(EXCLUDE_STRATEGIES)].reset_index(drop=True)
@@ -134,28 +178,36 @@ def build_manifest(pos_h5_path: str, neg_h5_path: str) -> pd.DataFrame:
 
 
 def assign_group_splits(df: pd.DataFrame, seed: int = RANDOM_SEED) -> pd.DataFrame:
-    groups = (
-        df.groupby("group_id", as_index=False)
-        .agg(
-            n_samples=("sample_key", "count"),
-            n_pos=("label", lambda x: int((x == 1).sum())),
-            n_neg=("label", lambda x: int((x == 0).sum())),
-            mean_length=("length", "mean"),
-        )["group_id"]
-        .tolist()
-    )
+    """Раскладывает группы гомологов по сплитам, целясь в доли ОБРАЗЦОВ.
+
+    Группы теперь сильно разного размера (от одной цепи до нескольких тысяч),
+    поэтому делить их поровну по счёту нельзя: доли образцов уехали бы. Группы
+    перемешиваются с фиксированным сидом, идут от больших к меньшим и каждая
+    попадает в сплит, который дальше всех от своей цели, — жадная упаковка,
+    детерминированная и без пересечений по построению.
+    """
+    sizes = df.groupby("group_id").size()
+    groups = sorted(sizes.index.tolist())
 
     rng = np.random.default_rng(seed)
     rng.shuffle(groups)
+    groups.sort(key=lambda g: -int(sizes[g]))
+
+    targets = {"train": TRAIN_FRAC, "val": VAL_FRAC, "test": 1.0 - TRAIN_FRAC - VAL_FRAC}
+    filled = {"train": 0, "val": 0, "test": 0}
+    assigned: dict[str, list[str]] = {"train": [], "val": [], "test": []}
+    total = int(sizes.sum())
+    for group in groups:
+        split = min(targets, key=lambda s: filled[s] / total - targets[s])
+        assigned[split].append(group)
+        filled[split] += int(sizes[group])
+
+    train_groups = set(assigned["train"])
+    val_groups = set(assigned["val"])
+    test_groups = set(assigned["test"])
 
     n = len(groups)
-    n_train = int(n * TRAIN_FRAC)
-    n_val = int(n * VAL_FRAC)
-    n_test = n - n_train - n_val
-
-    train_groups = set(groups[:n_train])
-    val_groups = set(groups[n_train : n_train + n_val])
-    test_groups = set(groups[n_train + n_val :])
+    n_test = len(test_groups)
 
     # Явные проверки вместо assert (устойчивы к запуску с -O)
     if len(train_groups | val_groups | test_groups) != n:
@@ -167,13 +219,17 @@ def assign_group_splits(df: pd.DataFrame, seed: int = RANDOM_SEED) -> pd.DataFra
     if val_groups & test_groups:
         raise ValueError("Пересечение val/test групп обнаружено!")
     if n_test < 1:
-        raise ValueError(
-            f"Тестовый сплит пустой (n_groups={n}, train={n_train}, val={n_val})"
-        )
+        raise ValueError(f"Тестовый сплит пустой (групп всего {n})")
 
     split_map = {g: "train" for g in train_groups}
     split_map.update({g: "val" for g in val_groups})
     split_map.update({g: "test" for g in test_groups})
+
+    print(
+        "Доли образцов по сплитам: "
+        + ", ".join(f"{s} {filled[s] / total:.3f} (цель {targets[s]:.2f}, групп {len(assigned[s]):,})"
+                    for s in ("train", "val", "test"))
+    )
 
     df = df.copy()
     df["split"] = df["group_id"].map(split_map)
@@ -265,7 +321,7 @@ def main() -> None:
     print(f"Reading positive H5 : {os.path.abspath(POS_H5)}")
     print(f"Reading negative H5 : {os.path.abspath(NEG_H5)}")
 
-    df = build_manifest(POS_H5, NEG_H5)
+    df = build_manifest(POS_H5, NEG_H5, CLUSTERS)
     df.to_csv(OUT_MANIFEST, index=False)
 
     df = assign_group_splits(df, seed=RANDOM_SEED)
