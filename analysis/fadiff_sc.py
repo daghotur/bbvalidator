@@ -1,5 +1,5 @@
 """
-analysis_fadiff_sc.py
+analysis/fadiff_sc.py
 ---------------------
 Self-consistency метрики для выходов собственного генератора (fadiff-fork
 probe): для каждого таргета 8 ESMFold-рефолдов спроектированных
@@ -7,10 +7,10 @@ probe): для каждого таргета 8 ESMFold-рефолдов спро
 считается CA-RMSD — полный, по мотиву и по скаффолд-областям
 (позиции мотива берутся из fixed.jsonl пробы).
 
-Затем P(fold) наших моделей (eval_generated.py --dirs fadiff=...)
+Затем P(fold) наших моделей (evaluation/eval_generated.py --dirs fadiff=...)
 коррелирует с полученным scRMSD.
 
-Запуск:  python analysis_fadiff_sc.py
+Запуск:  python -m analysis.fadiff_sc
 """
 
 import glob
@@ -23,9 +23,9 @@ import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
 PROBE_ROOT = "/home/pc/PycharmProjects/fadiff-fork/.cache/probe_numt500"
-PFOLD_CSV = "eval_results_fadiff_detail.csv"
-OUT_CSV = "fadiff_self_consistency.csv"
-OUT_JSON = "eval_results_fadiff_scrmsd.json"
+PFOLD_CSV = "results/eval_results_fadiff_detail.csv"
+OUT_CSV = "results/fadiff_self_consistency.csv"
+OUT_JSON = "results/eval_results_fadiff_scrmsd.json"
 FIG_DIR = "figures"
 
 
@@ -120,8 +120,8 @@ def main():
     if not os.path.exists(PFOLD_CSV):
         print(
             f"\n{PFOLD_CSV} не найден — сначала запустите:\n"
-            "  python eval_generated.py --dirs fadiff=" + PROBE_ROOT
-            + " --pattern '**/generated.pdb' -o eval_results_fadiff.json"
+            "  python -m evaluation.eval_generated --dirs fadiff=" + PROBE_ROOT
+            + " --pattern '**/generated.pdb' -o results/eval_results_fadiff.json"
         )
         return
 

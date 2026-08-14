@@ -1,5 +1,5 @@
 """
-analysis_logits_ranking.py
+analysis/logits_ranking.py
 --------------------------
 Нулевая диагностика ранжирующего сигнала на дальнем OOD: проверяет, не является
 ли ослабление корреляций P(fold) ↔ scRMSD артефактом насыщения сигмоиды.
@@ -13,11 +13,10 @@ analysis_logits_ranking.py
 ранжирования» — артефакт динамического диапазона выхода, а не утрата
 информации представлением.
 
-Запуск:  python analysis_logits_ranking.py
+Запуск:  python -m analysis.logits_ranking
 """
 
 import argparse
-import glob
 import json
 import os
 
@@ -26,87 +25,33 @@ import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from analysis_scrmsd import parse_motifbench_eval
-from eval_model import build_eval_model
+from common.motifbench import EVAL_SOURCES, GENERATOR_DIRS, scaffold_table
+from common.structures import iter_padded_batches, parse_pdb_files
+from evaluation.eval_model import CHECKPOINTS as MODELS
+from evaluation.eval_model import build_eval_model
+from inference import _autocast_ctx
 
-GENERATOR_DIRS = {
-    "RFdiffusion": "data/ood/rfdiffusion",
-    "RFdiffusion-AA": "data/ood/rfdiffusion_aa",
-    "ODesign-Rigid": "data/ood/odesign_rigid",
-    "GPDL": "data/ood/gpdl",
-    "EvoDiff": "data/ood/evodiff",
-}
-EVAL_SOURCES = {
-    "RFdiffusion": "data/ood/eval_rfdiffusion",
-    "RFdiffusion-AA": "data/ood/eval_rfdiffusion_aa",
-    "ODesign-Rigid": "data/ood/eval_odesign_rigid",
-    "GPDL": "data/ood/eval_gpdl",
-    "EvoDiff": "data/ood/eval_evodiff",
-}
-MODELS = {
-    "hybrid": "checkpoints/best_model.pth",
-    "mlp": "checkpoints/baseline_mlp_best.pth",
-    "gps": "checkpoints/baseline_gps_best.pth",
-}
-OUT_CSV = "analysis_logits_ranking.csv"
-OUT_JSON = "analysis_logits_ranking.json"
-
-
-def parse_pdb_files(root_dir: str) -> list[dict]:
-    pdb_files = sorted(glob.glob(os.path.join(root_dir, "**", "*.pdb"), recursive=True))
-    pdb_files = [
-        f
-        for f in pdb_files
-        if "__MACOSX" not in f and not os.path.basename(f).startswith("._")
-    ]
-
-    from inference import parse_pdb_to_backbone
-
-    records = []
-    skipped = 0
-    for path in pdb_files:
-        try:
-            coords = parse_pdb_to_backbone(path).astype(np.float32)
-        except Exception:
-            skipped += 1
-            continue
-        parts = path.split(os.sep)
-        records.append({"sample": parts[-1], "motif": parts[-2], "coords": coords})
-    return records, skipped
+OUT_CSV = "results/analysis_logits_ranking.csv"
+OUT_JSON = "results/analysis_logits_ranking.json"
 
 
 @torch.no_grad()
 def score_records(model, records: list[dict], device: torch.device,
                   batch_size: int = 32) -> list[dict]:
-    from inference import _autocast_ctx, center_coords
-
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
     results = [None] * len(records)
     done = 0
 
-    for start in range(0, len(order), batch_size):
-        batch_idx = order[start : start + batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in batch_idx)
-        B = len(batch_idx)
-
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, idx in enumerate(batch_idx):
-            L = len(records[idx]["coords"])
-            coords[b, :L] = center_coords(records[idx]["coords"])
-            mask[b, :L] = True
-
-        coords_t = torch.from_numpy(coords).to(device)
-        mask_t = torch.from_numpy(mask).to(device)
-
+    for n_batch, (idxs, coords, mask) in enumerate(
+        iter_padded_batches(records, batch_size, device)
+    ):
         with _autocast_ctx(device):
-            preds = model(coords_t, mask_t)
+            preds = model(coords, mask)
 
         fold_logit = preds["fold_logit"].float().cpu().numpy()
         rmsd_raw = preds["rmsd"].float().cpu().numpy()
         p_fold = 1.0 / (1.0 + np.exp(-fold_logit))
 
-        for b, idx in enumerate(batch_idx):
+        for b, idx in enumerate(idxs):
             r = dict(records[idx])
             r["p_fold"] = float(p_fold[b])
             r["fold_logit"] = float(fold_logit[b])
@@ -114,8 +59,8 @@ def score_records(model, records: list[dict], device: torch.device,
             r["rmsd_pred"] = float(max(0.0, np.expm1(rmsd_raw[b])))
             results[idx] = r
 
-        done += B
-        if (start // batch_size) % 20 == 0:
+        done += len(idxs)
+        if n_batch % 20 == 0:
             print(f"    скоринг: {done}/{len(records)}")
 
     return results
@@ -145,7 +90,7 @@ def main():
     # Ground truth scRMSD по генераторам
     scrmsd_by_group = {}
     for group, root in EVAL_SOURCES.items():
-        mb = parse_motifbench_eval(root)[["motif", "sample", "sc_rmsd"]]
+        mb = scaffold_table(root)[["motif", "sample", "sc_rmsd"]]
         scrmsd_by_group[group] = mb
         print(f"{group}: {len(mb)} скаффолдов со scRMSD")
 

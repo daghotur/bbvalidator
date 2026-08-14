@@ -1,25 +1,25 @@
 """
-train_perresidue.py
+training/perresidue.py
 -------------------
 Дообучение на ПО-ОСТАТОЧНУЮ метку вместо одного скаляра на структуру.
 
-Мотивация (измерено, см. analysis_oracle_ceiling.py): метка scRMSD надёжна
+Мотивация (измерено, см. analysis/oracle_ceiling.py): метка scRMSD надёжна
 (R = 0.85-0.96), но модель забирает лишь 32-54% доступного внутримотивного
 сигнала. Узкое место — не сложность задачи и не шум оракула, а плотность
 супервизии: ~15k структур × 1 скаляр. По-остаточный таргет даёт ~1.5M меток
 из тех же данных, без единого нового прогона ESMFold.
 
 Таргет — CA-lDDT против ESMFold-рефолда, усреднённый по 8 последовательностям
-(build_lddt_labels.py). Лосс — BCE по мягкой метке, маскированный по валидным
+(training/build_lddt_labels.py). Лосс — BCE по мягкой метке, маскированный по валидным
 остаткам. Глобальный скор для ранжирования выводится агрегацией:
 score = mean_i sigmoid(lddt_logit_i), больше = дизайнируемее.
 
-Протокол сравнения с train_soft.py — тот же, чтобы разница была в супервизии,
+Протокол сравнения с training/soft.py — тот же, чтобы разница была в супервизии,
 а не в данных: старт из checkpoints/best_model.pth, обучение на RFdiffusion +
 RFdiffusion-AA + EvoDiff (90% скаффолдов), выбор эпохи по 10% их же скаффолдов,
 ODesign-Rigid и GPDL целиком в холдауте.
 
-Запуск:  python train_perresidue.py
+Запуск:  python -m training.perresidue
 """
 
 import os
@@ -28,25 +28,30 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from analysis_logits_ranking import GENERATOR_DIRS, parse_pdb_files
-from inference import _autocast_ctx, build_model, center_coords
-from train_soft import HOLDOUT_GENERATORS, PCA, TRAIN_GENERATORS
+from common.motifbench import (
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    TRAIN_GENERATORS,
+    motif_split,
+)
+from common.structures import iter_padded_batches, parse_pdb_files
+from inference import _autocast_ctx, build_model
+from training.soft import PCA
 
 CKPT = "checkpoints/best_model.pth"
 OUT = "checkpoints/perres_model.pth"
-LABEL_DIR = "lddt_labels"
+LABEL_DIR = "dataset/lddt_labels"
 
 EPOCHS = 20
 LR = 5e-5
 BATCH = 32
-VAL_FRACTION = 0.1
 SEED = 42
 
 
 def load_labels(generator: str) -> dict:
     path = os.path.join(LABEL_DIR, f"{generator.replace('/', '_')}.npz")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"{path} — сначала запустите build_lddt_labels.py")
+        raise FileNotFoundError(f"{path} — сначала запустите python -m training.build_lddt_labels")
     with np.load(path) as z:
         # [2, L]: строка 0 — среднее lDDT по рефолдам, строка 1 — std (согласие оракула)
         return {k: z[k][0].astype(np.float32) for k in z.files}
@@ -72,25 +77,13 @@ def collect(generator: str) -> list[dict]:
 
 
 def make_batches(records: list[dict], device: torch.device, shuffle: bool):
-    n = len(records)
-    order = np.random.permutation(n) if shuffle else np.arange(n)
-    for start in range(0, n, BATCH):
-        idxs = order[start : start + BATCH]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        target = np.zeros((B, Lmax), dtype=np.float32)
+    """Батчи (coords, mask, по-остаточный таргет lDDT)."""
+    order = "shuffle" if shuffle else "sequential"
+    for idxs, coords, mask in iter_padded_batches(records, BATCH, device, order=order):
+        target = np.zeros(tuple(mask.shape), dtype=np.float32)
         for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = center_coords(records[i]["coords"])
-            mask[b, :L] = True
-            target[b, :L] = records[i]["lddt"]
-        yield (
-            torch.from_numpy(coords).to(device),
-            torch.from_numpy(mask).to(device),
-            torch.from_numpy(target).to(device),
-        )
+            target[b, : len(records[i]["lddt"])] = records[i]["lddt"]
+        yield coords, mask, torch.from_numpy(target).to(device)
 
 
 def masked_bce(logit: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -124,15 +117,17 @@ def main():
     print(f"Устройство: {device}")
 
     print("Сбор обучающих генераторов:")
+    collected = {gen: collect(gen) for gen in TRAIN_GENERATORS}
+    train_motifs, val_motifs = motif_split(
+        {r["motif"] for recs in collected.values() for r in recs}
+    )
+    print(f"Мотивов: {len(train_motifs)} в обучении, {len(val_motifs)} отложено "
+          f"под выбор эпохи ({', '.join(sorted(val_motifs))})")
+
     train_records, val_records = [], []
-    rng = np.random.default_rng(SEED)
-    for gen in TRAIN_GENERATORS:
-        recs = collect(gen)
-        # сплит по скаффолдам внутри генератора (как в train_soft.py)
-        idx = rng.permutation(len(recs))
-        n_val = int(len(recs) * VAL_FRACTION)
-        val_records += [recs[i] for i in idx[:n_val]]
-        train_records += [recs[i] for i in idx[n_val:]]
+    for gen, recs in collected.items():
+        val_records += [r for r in recs if r["motif"] in val_motifs]
+        train_records += [r for r in recs if r["motif"] not in val_motifs]
 
     n_labels = sum(len(r["lddt"]) for r in train_records)
     print(f"train {len(train_records)} структур / {n_labels} по-остаточных меток, "
@@ -168,7 +163,7 @@ def main():
               f"val BCE {val_bce:.4f} | val MAE {val_mae:.4f}{flag}")
 
     print(f"\nЛучший чекпоинт: {OUT} (val BCE {best:.4f})")
-    print("Дальше: analysis_perresidue.py — within-motif ранжирование против soft_model")
+    print("Дальше: python -m analysis.perresidue — within-motif ранжирование против soft_model")
 
 
 if __name__ == "__main__":

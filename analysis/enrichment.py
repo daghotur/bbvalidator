@@ -1,11 +1,15 @@
 """
-analysis_enrichment.py
+analysis/enrichment.py
 ----------------------
 Шаг 2 (ревизованный): фактор обогащения скрининга дизайнуемости.
 
 Для 18k структур MotifBench считает, во сколько раз доля «дизайнуемых»
 (scRMSD < 2 Å по self-consistency оракулу — вычислительный прокси, не
 экспериментальная истина) в топ-q% по скореру выше базовой доли.
+
+Метка — общая для проекта: scRMSD = min по восьми последовательностям
+(common/motifbench.py, SCRMSD_AGG). Числа этого анализа до 2026-08-14
+считались против среднего и с публикуемыми несопоставимы.
 
 Обогащение считается POOLED и стратифицированно по генераторам: claim
 делается по within-generator обогащению, pooled может отражать просто
@@ -17,10 +21,9 @@ analysis_enrichment.py
   наивные бейзлайны: clash_pairs (геометрия, без весов), длина, random.
   Бейзлайны оцениваются в лучшей из двух направлений (даём им максимум шанса).
 
-Запуск:  python analysis_enrichment.py
+Запуск:  python -m analysis.enrichment
 """
 
-import glob
 import json
 import os
 
@@ -28,8 +31,17 @@ import numpy as np
 import pandas as pd
 import torch
 
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, MODELS, parse_pdb_files
-from eval_model import build_eval_model
+from common.motifbench import (
+    DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    scrmsd_by_scaffold,
+)
+from common.structures import iter_padded_batches, parse_pdb_files
+from evaluation.eval_model import CHECKPOINTS as MODELS
+from evaluation.eval_model import build_eval_model
+from inference import _autocast_ctx
+from preprocess.geometry_features import BackboneGeometryExtractor
 
 MODELS_EXT = {
     **MODELS,
@@ -37,37 +49,22 @@ MODELS_EXT = {
     "soft_mt": "checkpoints/soft_model_mt.pth",
 }
 
-DESIGNABLE_MAX_SCRMSD = 2.0
 Q_GRID = [0.01, 0.05, 0.10, 0.20, 0.30, 0.50]
-DETAIL_CSV = "eval_results_generated_detail.csv"
-OUT_CSV = "analysis_enrichment.csv"
-OUT_JSON = "analysis_enrichment.json"
+DETAIL_CSV = "results/eval_results_generated_detail.csv"
+OUT_CSV = "results/analysis_enrichment.csv"
+OUT_JSON = "results/analysis_enrichment.json"
 
 
 @torch.no_grad()
 def geometry_clashes(records: list[dict], device: torch.device,
                      batch_size: int = 64) -> np.ndarray:
     """Сырые стерические конфликты (Cβ < 3.5 Å, |i-j| >= 3) — без весов модели."""
-    from preprocess.biophys_frontend import BackboneGeometryExtractor
-
     extractor = BackboneGeometryExtractor().to(device)
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
     clashes = np.zeros(len(records), dtype=np.float32)
 
-    for start in range(0, len(order), batch_size):
-        idxs = order[start : start + batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = records[i]["coords"]
-            mask[b, :L] = True
-        geom = extractor(
-            torch.from_numpy(coords).to(device), torch.from_numpy(mask).to(device)
-        )
-        per_struct = (geom["clash_count"] * torch.from_numpy(mask).to(device).float()).sum(-1) / 2.0
+    for idxs, coords, mask in iter_padded_batches(records, batch_size, device):
+        geom = extractor(coords, mask)
+        per_struct = (geom["clash_count"] * mask.float()).sum(-1) / 2.0
         for b, i in enumerate(idxs):
             clashes[i] = per_struct[b].item()
     return clashes
@@ -76,25 +73,13 @@ def geometry_clashes(records: list[dict], device: torch.device,
 @torch.no_grad()
 def score_deterministic(model, records: list[dict], device: torch.device,
                         batch_size: int = 32) -> pd.DataFrame:
-    from inference import _autocast_ctx, center_coords
+    rows: list[dict | None] = [None] * len(records)
 
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
-    rows = [None] * len(records)
-
-    for start in range(0, len(order), batch_size):
-        idxs = order[start : start + batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = center_coords(records[i]["coords"])
-            mask[b, :L] = True
-
+    for n_batch, (idxs, coords, mask) in enumerate(
+        iter_padded_batches(records, batch_size, device)
+    ):
         with _autocast_ctx(device):
-            preds = model(torch.from_numpy(coords).to(device),
-                          torch.from_numpy(mask).to(device))
+            preds = model(coords, mask)
 
         logit = preds["fold_logit"].float().cpu().numpy()
         rmsd = preds["rmsd"].float().cpu().numpy()
@@ -105,8 +90,8 @@ def score_deterministic(model, records: list[dict], device: torch.device,
                 "rmsd_head": float(rmsd[b]),
                 "p_steric": float(steric[b]),
             }
-        if (start // batch_size) % 40 == 0:
-            print(f"    скоринг: {start + B}/{len(records)}")
+        if n_batch % 40 == 0:
+            print(f"    скоринг: {min((n_batch + 1) * batch_size, len(records))}/{len(records)}")
 
     return pd.DataFrame(rows)
 
@@ -187,21 +172,15 @@ def main():
     merged["clash_pairs"] = clash_pairs
     merged["length"] = length
 
-    # 5. Ground truth: scRMSD по генераторам (официальный формат MotifBench:
-    #    среднее rmsd по дизайнуемым секвенциям — агрегация воспроизводит
-    #    числа docs/05, табл. «Распределение scRMSD»)
+    # 5. Ground truth: scRMSD по генераторам, метка проекта (SCRMSD_AGG = min).
+    #    До 2026-08-14 здесь стоял свой парсер со средним по восьми
+    #    последовательностям — единственное место, не переведённое на min при
+    #    смене метки, из-за чего обогащение считалось против другой истины,
+    #    чем потолок оракула, relabel и обучение.
     scrmsd = {}
     for group, root in EVAL_SOURCES.items():
-        per_scaffold = {}
-        for f in glob.glob(
-            os.path.join(root, "*", "*", "*", "self_consistency", "esm_eval_results.csv")
-        ):
-            parts = f.split(os.sep)
-            motif, sample = parts[-4], parts[-3]
-            d = pd.read_csv(f)
-            per_scaffold[(motif, sample)] = float(d["rmsd"].mean())
-        scrmsd[group] = per_scaffold
-        print(f"{group}: {len(per_scaffold)} скаффолдов со scRMSD")
+        scrmsd[group] = scrmsd_by_scaffold(root)
+        print(f"{group}: {len(scrmsd[group])} скаффолдов со scRMSD")
 
     sc = np.array([
         scrmsd[g].get((r["motif"], r["sample"].removesuffix(".pdb")), np.nan)
@@ -268,7 +247,7 @@ def main():
         n = int((merged["group"] == g).sum())
         print(f"  {g}: {b:.3f} (n={n})")
 
-    print(f"\nОбогащение при топ-10% (бейзлайны — в лучшем направлении):")
+    print("\nОбогащение при топ-10% (бейзлайны — в лучшем направлении):")
     header = f"{'скорер':<24} | " + " | ".join(f"{g[:10]:>10}" for g in GENERATOR_DIRS) + " |     pooled"
     print(header)
     print("-" * len(header))

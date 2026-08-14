@@ -1,7 +1,7 @@
 """
-analysis_relabel.py
+analysis/relabel.py
 -------------------
-Перемер всех обученных моделей под исправленной меткой (analysis_label_choice.py):
+Перемер всех обученных моделей под исправленной меткой (analysis/label_choice.py):
 scRMSD = min по 8 последовательностям, как определено в docs/07, вместо mean.
 
 Почему нельзя просто сравнить lift «до» и «после»: база меняется. Под mean
@@ -15,7 +15,7 @@ scRMSD = min по 8 последовательностям, как опреде�
 проверяются по одной и той же половине B. Раньше модель проверялась по полной
 метке из 8, а оракул — по половине, что завышало долю «забранного» сигнала.
 
-Запуск:  python analysis_relabel.py
+Запуск:  python -m analysis.relabel
 """
 
 import json
@@ -26,30 +26,32 @@ import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from analysis_label_choice import (
+from common.motifbench import (
     AGGREGATORS,
-    MIN_SAMPLES_PER_MOTIF,
-    N_SPLITS,
-    TOP_FRAC,
-)
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, parse_pdb_files
-from analysis_oracle_ceiling import (
     DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    TRAIN_GENERATORS,
+    motif_role,
+    motif_split,
+    per_sequence_rmsd,
+)
+from common.ranking import (
+    MIN_SAMPLES_PER_MOTIF,
+    MIN_SEQUENCES_FOR_SPLIT,
+    N_SPLITS,
+    RNG_SEED,
     SATURATED_HIGH,
     SATURATED_LOW,
-    load_per_sequence_rmsd,
+    precision_at_top,
+    split_half,
 )
-from analysis_perresidue import score
+from common.scoring import score_designability, score_lookup
+from common.structures import motifs_in, parse_pdb_files
 from inference import build_model
-from train_soft import HOLDOUT_GENERATORS
 
-RNG_SEED = 42
-OUT_JSON = "analysis_relabel.json"
-
-
-def precision_at_top(rank_by: np.ndarray, design: np.ndarray) -> float:
-    k = max(1, round(TOP_FRAC * len(design)))
-    return float(design[np.argsort(rank_by)[:k]].mean())
+OUT_JSON = "results/analysis_relabel.json"
 
 
 def evaluate_motif(pred: np.ndarray, samples: list[np.ndarray], agg, rng) -> dict | None:
@@ -69,13 +71,7 @@ def evaluate_motif(pred: np.ndarray, samples: list[np.ndarray], agg, rng) -> dic
 
     m_lifts, o_lifts = [], []
     for _ in range(N_SPLITS):
-        a, b = [], []
-        for s in samples:
-            idx = rng.permutation(len(s))
-            half = len(s) // 2
-            a.append(agg(s[idx[:half]]))
-            b.append(agg(s[idx[half:]]))
-        a, b = np.array(a), np.array(b)
+        a, b = split_half(samples, agg, rng)
         design_b = b < DESIGNABLE_MAX_SCRMSD
         base_b = design_b.mean()
         if base_b == 0 or base_b == 1:
@@ -94,6 +90,22 @@ def evaluate_motif(pred: np.ndarray, samples: list[np.ndarray], agg, rng) -> dic
     }
 
 
+def summarise_rows(ms: pd.DataFrame) -> dict:
+    """Медианы по мотивам: ранжирование модели и потолок оракула."""
+    if not len(ms):
+        return {"n_kept_motifs": 0, "median_spearman": None, "median_lift": None,
+                "median_model_lift_vs_B": None, "median_oracle_lift_vs_B": None,
+                "frac_of_ceiling": None}
+    return {
+        "n_kept_motifs": int(len(ms)),
+        "median_spearman": float(ms["spearman"].median()),
+        "median_lift": float(ms["lift"].median()),
+        "median_model_lift_vs_B": float(ms["model_lift_vs_B"].median()),
+        "median_oracle_lift_vs_B": float(ms["oracle_lift_vs_B"].median()),
+        "frac_of_ceiling": float((ms["model_lift_vs_B"] / ms["oracle_lift_vs_B"]).median()),
+    }
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -104,10 +116,16 @@ def main():
         joint = build_model("checkpoints/joint_model.pth", device, per_residue=True)
         variants.append(("joint", joint, "fold"))
 
+    # Разбиение мотивов повторяется из common/motifbench — то же, что при обучении
+    all_motifs = set()
+    for gen in TRAIN_GENERATORS:
+        all_motifs |= motifs_in(GENERATOR_DIRS[gen])
+    _, val_motifs = motif_split(all_motifs)
+
     results = {}
     for gen in GENERATOR_DIRS:
         records, _ = parse_pdb_files(GENERATOR_DIRS[gen])
-        per_seq = load_per_sequence_rmsd(EVAL_SOURCES[gen])
+        per_seq = per_sequence_rmsd(EVAL_SOURCES[gen], min_sequences=MIN_SEQUENCES_FOR_SPLIT)
 
         by_motif: dict[str, list[np.ndarray]] = {}
         for (motif, sample), rmsd in per_seq.items():
@@ -115,8 +133,7 @@ def main():
 
         results[gen] = {}
         for vname, model, readout in variants:
-            pred = score(model, records, device, readout)
-            lookup = dict(zip(zip(pred["motif"], pred["sample"]), pred["pred_scrmsd"]))
+            lookup = score_lookup(score_designability(model, records, device, readout))
 
             for agg_name, agg in AGGREGATORS.items():
                 rng = np.random.default_rng(RNG_SEED)  # общий поток на вариант
@@ -133,16 +150,16 @@ def main():
                         rows.append({"motif": motif, "n": len(pairs), **r})
 
                 ms = pd.DataFrame(rows)
-                results[gen][f"{vname}/{agg_name}"] = {
-                    "n_kept_motifs": int(len(ms)),
-                    "median_spearman": float(ms["spearman"].median()) if len(ms) else None,
-                    "median_lift": float(ms["lift"].median()) if len(ms) else None,
-                    "median_model_lift_vs_B": float(ms["model_lift_vs_B"].median()) if len(ms) else None,
-                    "median_oracle_lift_vs_B": float(ms["oracle_lift_vs_B"].median()) if len(ms) else None,
-                    "frac_of_ceiling": float(
-                        (ms["model_lift_vs_B"] / ms["oracle_lift_vs_B"]).median()
-                    ) if len(ms) else None,
-                }
+                summary = summarise_rows(ms)
+                # Разрез по роли мотива: числа обучающих генераторов на
+                # обучающих мотивах — in-sample, а не обобщение
+                if len(ms):
+                    ms["role"] = [motif_role(gen, m, val_motifs) for m in ms["motif"]]
+                    summary["by_role"] = {
+                        role: summarise_rows(sub)
+                        for role, sub in ms.groupby("role")
+                    }
+                results[gen][f"{vname}/{agg_name}"] = summary
 
     hold = set(HOLDOUT_GENERATORS)
     print(f"\n{'генератор':16} {'модель/метка':14} {'мотивов':>8} {'Spearman':>9} "
@@ -157,6 +174,12 @@ def main():
             print(f"{'':16} {key:14} {v['n_kept_motifs']:>8d} "
                   f"{v['median_spearman']:>9.3f} {v['median_model_lift_vs_B']:>6.2f}x "
                   f"{v['median_oracle_lift_vs_B']:>7.2f}x {v['frac_of_ceiling']:>12.0%}")
+            for role, rv in sorted(v.get("by_role", {}).items()):
+                if rv["median_spearman"] is None:
+                    continue
+                print(f"{'':16} {'  ' + role:14} {rv['n_kept_motifs']:>8d} "
+                      f"{rv['median_spearman']:>9.3f} {rv['median_model_lift_vs_B']:>6.2f}x "
+                      f"{rv['median_oracle_lift_vs_B']:>7.2f}x {rv['frac_of_ceiling']:>12.0%}")
 
     with open(OUT_JSON, "w", encoding="utf-8") as fp:
         json.dump(results, fp, ensure_ascii=False, indent=2)

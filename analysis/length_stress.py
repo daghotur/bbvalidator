@@ -1,5 +1,5 @@
 """
-analysis_length_stress.py
+analysis/length_stress.py
 -------------------------
 Стресс-тест архитектуры по длине цепи на данных Scaffold-Lab.
 
@@ -26,23 +26,23 @@ Scaffold-Lab (Zenodo 20080699) даёт безусловно сгенериро�
   3. НЕ НАСЫЩАЮТСЯ ЛИ ПРИЗНАКИ — доля остатков, упирающихся в clamp;
   4. НЕ ВЫРОЖДАЕТСЯ ЛИ ПУЛИНГ — энтропия attention-весов относительно равномерной.
 
-Запуск:  python analysis_length_stress.py
+Запуск:  python -m analysis.length_stress
 """
 
 import glob
 import json
 import os
 
-import numpy as np
 import pandas as pd
 import torch
 
+from common.structures import iter_padded_batches
 from inference import _autocast_ctx, build_model, center_coords, parse_pdb_to_backbone
 
 ROOT = "data/ood/scaffold_lab/original_scaffolds"
 CKPT = "checkpoints/joint_model.pth"
-OUT_JSON = "analysis_length_stress.json"
-OUT_CSV = "length_stress_per_sample.csv"
+OUT_JSON = "results/analysis_length_stress.json"
+OUT_CSV = "results/length_stress_per_sample.csv"
 ATTN_BUDGET = 8_000_000   # B * N^2, чтобы не упереться в память на длинных цепях
 
 
@@ -64,33 +64,24 @@ def collect() -> list[dict]:
 @torch.no_grad()
 def score_group(model, group: list[dict], device) -> list[dict]:
     """Скоринг одной группы одинаковой номинальной длины."""
-    coords_list, kept = [], []
+    records = []
     for it in group:
         try:
-            coords_list.append(center_coords(parse_pdb_to_backbone(it["path"])))
-            kept.append(it)
+            coords = center_coords(parse_pdb_to_backbone(it["path"]))
         except Exception:
             continue
-    if not kept:
+        records.append({**it, "coords": coords})
+    if not records:
         return []
 
-    N = max(len(c) for c in coords_list)
-    B = max(1, min(32, int(ATTN_BUDGET / max(N, 1) ** 2)))
+    # На длинных цепях внимание квадратично по N — держим B * N^2 в бюджете
+    n_max = max(len(r["coords"]) for r in records)
+    batch_size = max(1, min(32, int(ATTN_BUDGET / max(n_max, 1) ** 2)))
 
     out = []
-    for s in range(0, len(kept), B):
-        chunk = coords_list[s : s + B]
-        Lmax = max(len(c) for c in chunk)
-        b = len(chunk)
-        arr = np.zeros((b, Lmax, 3, 3), dtype=np.float32)
-        msk = np.zeros((b, Lmax), dtype=np.bool_)
-        for i, c in enumerate(chunk):
-            arr[i, : len(c)] = c
-            msk[i, : len(c)] = True
-        ct = torch.from_numpy(arr).to(device)
-        mt = torch.from_numpy(msk).to(device)
-
-        feats = model.compute_features(ct, mt)
+    for idxs, ct, mt in iter_padded_batches(
+        records, batch_size, device, order="sequential"
+    ):
         with _autocast_ctx(device):
             preds = model(ct, mt)
 
@@ -114,15 +105,15 @@ def score_group(model, group: list[dict], device) -> list[dict]:
 
         mean_lddt = (lddt * mf).sum(1) / n_valid
 
-        for i, it in enumerate(kept[s : s + B]):
+        for b, i in enumerate(idxs):
             out.append({
-                **{k: it[k] for k in ("generator", "length_bin", "name")},
-                "L": int(n_valid[i].item()),
-                "pred_scrmsd": float(pred[i]),
-                "mean_lddt": float(mean_lddt[i]),
-                "attn_entropy_ratio": float(ent_ratio[i]),
-                "burial_saturated": float(burial_sat[i]),
-                "packing_saturated": float(p10[i]),
+                **{k: records[i][k] for k in ("generator", "length_bin", "name")},
+                "L": int(n_valid[b].item()),
+                "pred_scrmsd": float(pred[b]),
+                "mean_lddt": float(mean_lddt[b]),
+                "attn_entropy_ratio": float(ent_ratio[b]),
+                "burial_saturated": float(burial_sat[b]),
+                "packing_saturated": float(p10[b]),
             })
     return out
 

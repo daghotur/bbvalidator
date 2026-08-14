@@ -1,5 +1,5 @@
 """
-eval_model.py
+evaluation/eval_model.py
 -------------
 Оценка обученной модели на указанном сплите (по умолчанию test):
   • fold-задача: Accuracy, ROC-AUC, PR-AUC, ECE (калибровка)
@@ -11,8 +11,8 @@ eval_model.py
 Результаты пишутся в JSON и печатаются markdown-таблицей.
 
 Пример:
-    python eval_model.py -c checkpoints/best_model.pth --split test \
-        -o eval_results.json
+    python -m evaluation.eval_model -c checkpoints/best_model.pth --split test \
+        -o results/eval_results.json
 """
 
 import argparse
@@ -25,12 +25,24 @@ from tqdm import tqdm
 
 from baselines.train_baseline import build_baseline
 from dataset.dataloader import make_loader
-from inference import _autocast_ctx, build_model, remap_legacy_foldability_keys
+from inference import (
+    _autocast_ctx,
+    build_model,
+    expand_linear_inputs,
+    soft_checkpoint_marker,
+)
 from model.metrics import average_precision_score, expected_calibration_error, roc_auc_score
 from preprocess.fit_pca import load_pca_into_frontend
 
 NUM_FAILURE_CLASSES = 6
 THRESHOLD = 0.5
+
+# Три архитектуры одного протокола: гибрид и два базлайна (docs/05, раздел 5.3)
+CHECKPOINTS = {
+    "hybrid": "checkpoints/best_model.pth",
+    "mlp": "checkpoints/baseline_mlp_best.pth",
+    "gps": "checkpoints/baseline_gps_best.pth",
+}
 
 
 def build_eval_model(ckpt_path: str, device: torch.device, pca_path: str):
@@ -41,7 +53,6 @@ def build_eval_model(ckpt_path: str, device: torch.device, pca_path: str):
     """
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = remap_legacy_foldability_keys(state_dict)
 
     if any(k.startswith("encoder.net.") for k in state_dict):
         arch = "mlp"
@@ -58,6 +69,9 @@ def build_eval_model(ckpt_path: str, device: torch.device, pca_path: str):
     model = build_baseline(arch, device)
     if os.path.exists(pca_path):
         load_pca_into_frontend(model.frontend, pca_path)
+    # Базлайны обучены до расширения парного канала 20 → 29: у GPS вход
+    # lin_edge дополняется нулями, как у гибрида (docs/05, раздел 5.8).
+    state_dict = expand_linear_inputs(state_dict, model)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -220,9 +234,25 @@ def main():
     parser.add_argument("--pca", default="dataset/pca_components.pth")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("-o", "--output", default="eval_results.json")
+    parser.add_argument("-o", "--output", default="results/eval_results.json")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
+
+    # Батарея трактует fold_logit как логит бинарной классификации. После
+    # soft-дообучения это регрессия log1p(scRMSD), и sigmoid от неё — не
+    # вероятность: accuracy, precision/recall и особенно ECE бессмысленны
+    # (ROC-AUC переживает только потому, что ранговый). Ранжирующие модели
+    # меряются обогащением и внутримотивным lift, а не этой батареей.
+    marker = soft_checkpoint_marker(
+        torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    )
+    if marker:
+        raise SystemExit(
+            f"{args.ckpt} — soft-чекпоинт ({marker}): голова fold предсказывает "
+            "log1p(scRMSD), а не вероятность фолдинга, и бинарная батарея к нему "
+            "неприменима. Ранжирование: python -m analysis.enrichment, "
+            "python -m analysis.relabel."
+        )
 
     device = torch.device("cpu") if args.cpu else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Оценка на устройстве: {device} | split={args.split}")

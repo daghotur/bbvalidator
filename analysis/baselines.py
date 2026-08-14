@@ -1,5 +1,5 @@
 """
-analysis_baselines.py
+analysis/baselines.py
 ---------------------
 Батарея дешёвых бейзлайнов против обученной модели: бьём ли мы вообще что-то,
 кроме тривиальных геометрических дескрипторов?
@@ -24,38 +24,46 @@ analysis_baselines.py
 на каждом генераторе (оптимистичная оценка), наша модель идёт в своём
 естественном направлении. Если мы всё равно выигрываем — вывод устойчив.
 
-Метрика и потолок — как в analysis_relabel.py: внутримотивно, метка min по 8
+Метрика и потолок — как в analysis/relabel.py: внутримотивно, метка min по 8
 последовательностям, потолок оракула на общей половине B.
 
-Запуск:  python analysis_baselines.py
+Запуск:  python -m analysis.baselines
 """
 
-import glob
 import json
-import os
 
 import numpy as np
 import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from analysis_label_choice import AGGREGATORS, MIN_SAMPLES_PER_MOTIF, N_SPLITS, TOP_FRAC
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, parse_pdb_files
-from analysis_oracle_ceiling import (
+from common.motifbench import (
+    AGGREGATORS,
     DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    SCRMSD_AGG,
+    mpnn_scores,
+    per_sequence_rmsd,
+)
+from common.ranking import (
+    MIN_SAMPLES_PER_MOTIF,
+    MIN_SEQUENCES_FOR_SPLIT,
+    N_SPLITS,
+    RNG_SEED,
     SATURATED_HIGH,
     SATURATED_LOW,
-    load_per_sequence_rmsd,
+    precision_at_top,
+    split_half,
 )
-from analysis_perresidue import score
-from analysis_scrmsd import SCRMSD_AGG
+from common.scoring import score_designability, score_lookup
+from common.structures import parse_pdb_files
 from inference import build_model
-from train_soft import HOLDOUT_GENERATORS
 
 CONTACT_CUTOFF = 8.0
 MIN_SEQ_SEP = 3
-RNG_SEED = 42
-OUT_JSON = "analysis_baselines.json"
+OUT_JSON = "results/analysis_baselines.json"
 
 
 def geometric_descriptors(coords: np.ndarray) -> dict:
@@ -81,37 +89,6 @@ def geometric_descriptors(coords: np.ndarray) -> dict:
     }
 
 
-def parse_mpnn(root: str) -> dict:
-    """(motif, sample) -> средние ProteinMPNN NLL: по всем остаткам и по дизайну."""
-    out = {}
-    for path in glob.glob(os.path.join(root, "**", "esm_eval_results.csv"), recursive=True):
-        if "__MACOSX" in path:
-            continue
-        parts = path.split(os.sep)
-        try:
-            df = pd.read_csv(path)
-        except Exception:
-            continue
-        if "mpnn_score" not in df.columns or "header" not in df.columns:
-            continue
-        # header: "T=0.1, sample=1, score=1.0111, global_score=1.3253, ..."
-        design = df["header"].str.extract(r"score=([\d.]+)")[0]
-        design = pd.to_numeric(design, errors="coerce")
-        glob_ = pd.to_numeric(df["mpnn_score"], errors="coerce")
-        if glob_.notna().sum() == 0:
-            continue
-        out[(parts[-4], parts[-3])] = {
-            "mpnn_global": float(glob_.mean()),
-            "mpnn_design": float(design.mean()) if design.notna().any() else np.nan,
-        }
-    return out
-
-
-def precision_at_top(rank_by: np.ndarray, design: np.ndarray) -> float:
-    k = max(1, round(TOP_FRAC * len(design)))
-    return float(design[np.argsort(rank_by)[:k]].mean())
-
-
 def evaluate(values: np.ndarray, samples: list[np.ndarray], agg, rng,
              best_direction: bool) -> dict | None:
     """Ранжирующее качество произвольного скора на одном мотиве."""
@@ -129,13 +106,7 @@ def evaluate(values: np.ndarray, samples: list[np.ndarray], agg, rng,
 
     m_lifts, o_lifts = [], []
     for _ in range(N_SPLITS):
-        a, b = [], []
-        for s in samples:
-            i = rng.permutation(len(s))
-            h = len(s) // 2
-            a.append(agg(s[i[:h]]))
-            b.append(agg(s[i[h:]]))
-        a, b = np.array(a), np.array(b)
+        a, b = split_half(samples, agg, rng)
         d_b = b < DESIGNABLE_MAX_SCRMSD
         if d_b.all() or not d_b.any():
             continue
@@ -162,10 +133,9 @@ def main():
     results = {}
     for gen in GENERATOR_DIRS:
         records, _ = parse_pdb_files(GENERATOR_DIRS[gen])
-        per_seq = load_per_sequence_rmsd(EVAL_SOURCES[gen])
-        mpnn = parse_mpnn(EVAL_SOURCES[gen])
-        pred = score(model, records, device, "fold")
-        model_lookup = dict(zip(zip(pred["motif"], pred["sample"]), pred["pred_scrmsd"]))
+        per_seq = per_sequence_rmsd(EVAL_SOURCES[gen], min_sequences=MIN_SEQUENCES_FOR_SPLIT)
+        mpnn = mpnn_scores(EVAL_SOURCES[gen])
+        model_lookup = score_lookup(score_designability(model, records, device, "fold"))
 
         by_motif: dict[str, list] = {}
         for r in records:

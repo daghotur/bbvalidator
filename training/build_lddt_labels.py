@@ -1,5 +1,5 @@
 """
-build_lddt_labels.py
+training/build_lddt_labels.py
 --------------------
 Извлекает по-остаточную метку дизайнуемости из уже посчитанных рефолдов
 MotifBench: вместо одного скаляра scRMSD на структуру — вектор длины L.
@@ -20,7 +20,7 @@ MotifBench: вместо одного скаляра scRMSD на структу�
 Выход: lddt_labels/<generator>.npz — per-sample массивы lddt (L,), а также
 std по 8 рефолдам (мера согласия оракула на каждый остаток).
 
-Запуск:  python build_lddt_labels.py
+Запуск:  python -m training.build_lddt_labels
 """
 
 import glob
@@ -28,10 +28,10 @@ import os
 
 import numpy as np
 
-from analysis_logits_ranking import EVAL_SOURCES
+from common.motifbench import EVAL_SOURCES
 from inference import parse_pdb_to_backbone
 
-OUT_DIR = "lddt_labels"
+OUT_DIR = "dataset/lddt_labels"
 INCLUSION_RADIUS = 15.0
 THRESHOLDS = (0.5, 1.0, 2.0, 4.0)
 MIN_SEQ_SEP = 1
@@ -63,7 +63,7 @@ def per_residue_lddt(ref: np.ndarray, mod: np.ndarray) -> np.ndarray:
     return num / np.maximum(den, 1)
 
 
-def process_generator(generator: str, root: str) -> dict:
+def process_generator(generator: str, root: str) -> tuple[dict, dict]:
     samples = sorted(glob.glob(os.path.join(root, "**", "self_consistency"), recursive=True))
     out = {}
     stats = {"ok": 0, "no_refolds": 0, "length_mismatch": 0, "parse_error": 0}

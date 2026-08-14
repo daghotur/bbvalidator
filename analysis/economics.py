@@ -1,5 +1,5 @@
 """
-analysis_economics.py
+analysis/economics.py
 ---------------------
 Перевод ранжирующего качества в то, ради чего строился фильтр: сколько дорогих
 проверок экономится и сколько хороших кандидатов при этом теряется.
@@ -24,7 +24,7 @@ scRMSD. Вопрос: на сколько раньше находится пер
 поэтому часы приводятся с явным диапазоном. Отношение цен, а не абсолютные
 часы — то, что здесь надёжно.
 
-Запуск:  python analysis_economics.py
+Запуск:  python -m analysis.economics
 """
 
 import json
@@ -33,19 +33,26 @@ import numpy as np
 import pandas as pd
 import torch
 
-from analysis_label_choice import AGGREGATORS
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, parse_pdb_files
-from analysis_oracle_ceiling import DESIGNABLE_MAX_SCRMSD, load_per_sequence_rmsd
-from analysis_perresidue import score
-from analysis_scrmsd import SCRMSD_AGG
+from common.motifbench import (
+    AGGREGATORS,
+    DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    SCRMSD_AGG,
+    per_sequence_rmsd,
+)
+from common.ranking import MIN_SEQUENCES_FOR_SPLIT
+from common.scoring import score_designability
+from common.structures import parse_pdb_files
 from inference import build_model
-from train_soft import HOLDOUT_GENERATORS
 
 REPEATS = 3            # усреднение предсказаний против bf16-джиттера
 BUDGETS = (1, 3, 5, 10, 20)
 FILTER_RATE = 230.0    # структур/с, полный прогон filter_designability (docs/05 5.5)
 VERIFY_SECONDS = (10.0, 20.0, 60.0)   # 8 рефолдов ESMFold: нижняя, средняя, верхняя
-OUT_JSON = "analysis_economics.json"
+OUT_JSON = "results/analysis_economics.json"
+OUT_CSV = "results/economics_per_motif.csv"
 
 
 def hypergeom_hit(n: int, d: int, k: int) -> float:
@@ -70,9 +77,9 @@ def main():
     pooled = {}
     for gen in GENERATOR_DIRS:
         records, _ = parse_pdb_files(GENERATOR_DIRS[gen])
-        per_seq = load_per_sequence_rmsd(EVAL_SOURCES[gen])
+        per_seq = per_sequence_rmsd(EVAL_SOURCES[gen], min_sequences=MIN_SEQUENCES_FOR_SPLIT)
 
-        preds = [score(model, records, device, "fold") for _ in range(REPEATS)]
+        preds = [score_designability(model, records, device) for _ in range(REPEATS)]
         mean_pred = np.mean([p["pred_scrmsd"].to_numpy() for p in preds], axis=0)
         base = preds[0].assign(pred=mean_pred)
 
@@ -108,7 +115,7 @@ def main():
             rows.append(rec)
 
     ms = pd.DataFrame(rows)
-    ms.to_csv("economics_per_motif.csv", index=False)
+    ms.to_csv(OUT_CSV, index=False)
     solvable = ms[ms["n_design"] > 0].copy()
     solvable["speedup"] = solvable["first_random"] / solvable["first_model"]
 
@@ -203,7 +210,7 @@ def main():
             "scenarios": {k: {str(kk): vv for kk, vv in v.items()}
                           for k, v in scenarios.items()},
         }, fp, ensure_ascii=False, indent=2)
-    print(f"\nСохранено: {OUT_JSON}, economics_per_motif.csv")
+    print(f"\nСохранено: {OUT_JSON}, {OUT_CSV}")
 
 
 if __name__ == "__main__":

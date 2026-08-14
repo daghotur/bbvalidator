@@ -20,7 +20,7 @@ def benchmark_model(pdb_path: str, ckpt_path: str, mc_runs: int, iterations: int
     coords_ts = torch.from_numpy(coords_np).unsqueeze(0).to(device)
     mask_ts = torch.ones((1, length), dtype=torch.bool, device=device)
 
-    print(f"Прогрев 5 итераций...")
+    print("Прогрев 5 итераций...")
     for _ in range(5):
         with _autocast_ctx(device):
             _ = predict_with_uncertainty(model, coords_ts, mask_ts, mc_runs=mc_runs)

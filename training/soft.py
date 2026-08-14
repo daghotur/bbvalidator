@@ -1,5 +1,5 @@
 """
-train_soft.py
+training/soft.py
 -------------
 Дообучение на мягкую метку: голова fold переводится с бинарной классификации
 (BCE + сигмоида) на регрессию y = log1p(scRMSD) по self-consistency оракулу
@@ -9,31 +9,27 @@ MotifBench. Скор модели = предсказанный scRMSD (мень�
 Протокол hold-out:
   обучение — RFdiffusion, RFdiffusion-AA, EvoDiff (90% скаффолдов каждого);
   выбор эпохи — 10% скаффолдов обучающих генераторов (val);
-  финальный отчёт — невиданные ODesign-Rigid и GPDL (см. analysis_enrichment.py).
+  финальный отчёт — невиданные ODesign-Rigid и GPDL (см. analysis/enrichment.py).
 
-Запуск:  python train_soft.py
+Запуск:  python -m training.soft
 """
 
-import glob
 import os
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from analysis_logits_ranking import GENERATOR_DIRS, parse_pdb_files
-from analysis_scrmsd import SCRMSD_AGG
-from inference import build_model
-
-TRAIN_GENERATORS = ["RFdiffusion", "RFdiffusion-AA", "EvoDiff"]
-HOLDOUT_GENERATORS = ["ODesign-Rigid", "GPDL"]
-EVAL_ROOTS = {
-    "RFdiffusion": "data/ood/eval_rfdiffusion",
-    "RFdiffusion-AA": "data/ood/eval_rfdiffusion_aa",
-    "ODesign-Rigid": "data/ood/eval_odesign_rigid",
-    "GPDL": "data/ood/eval_gpdl",
-    "EvoDiff": "data/ood/eval_evodiff",
-}
+from common.motifbench import (
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    TRAIN_GENERATORS,
+    motif_split,
+    scrmsd_by_scaffold,
+)
+from common.structures import iter_padded_batches, parse_pdb_files
+from inference import _autocast_ctx, build_model
 
 CKPT = "checkpoints/best_model.pth"
 PCA = "dataset/pca_components.pth"
@@ -42,27 +38,12 @@ OUT = "checkpoints/soft_model.pth"
 EPOCHS = 20
 LR = 5e-5
 BATCH = 32
-VAL_FRACTION = 0.1
 SEED = 42
-
-
-def parse_scrmsd(root: str, agg: str = SCRMSD_AGG) -> dict:
-    """(motif, sample) -> scRMSD скаффолда, агрегированный по 8 рефолдам."""
-    import pandas as pd
-
-    out = {}
-    for f in glob.glob(os.path.join(root, "*", "*", "*", "self_consistency", "esm_eval_results.csv")):
-        parts = f.split(os.sep)
-        v = pd.to_numeric(pd.read_csv(f)["rmsd"], errors="coerce").dropna()
-        if len(v) == 0:
-            continue
-        out[(parts[-4], parts[-3])] = float(v.min() if agg == "min" else v.mean())
-    return out
 
 
 def collect(group: str) -> tuple[list[dict], np.ndarray]:
     records, _ = parse_pdb_files(GENERATOR_DIRS[group])
-    scrmsd = parse_scrmsd(EVAL_ROOTS[group])
+    scrmsd = scrmsd_by_scaffold(EVAL_SOURCES[group])
     kept, ys = [], []
     for r in records:
         y = scrmsd.get((r["motif"], r["sample"].removesuffix(".pdb")))
@@ -73,25 +54,10 @@ def collect(group: str) -> tuple[list[dict], np.ndarray]:
 
 
 def make_batches(records: list[dict], ys: np.ndarray, device: torch.device, shuffle: bool):
-    from inference import center_coords
-
-    n = len(records)
-    order = np.random.permutation(n) if shuffle else np.arange(n)
-    for start in range(0, n, BATCH):
-        idxs = order[start : start + BATCH]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = center_coords(records[i]["coords"])
-            mask[b, :L] = True
-        yield (
-            torch.from_numpy(coords).to(device),
-            torch.from_numpy(mask).to(device),
-            torch.from_numpy(ys[idxs]).to(device),
-        )
+    """Батчи (coords, mask, таргет) в порядке случайном или как есть."""
+    order = "shuffle" if shuffle else "sequential"
+    for idxs, coords, mask in iter_padded_batches(records, BATCH, device, order=order):
+        yield coords, mask, torch.from_numpy(ys[idxs]).to(device)
 
 
 @torch.no_grad()
@@ -100,7 +66,8 @@ def evaluate(model, records: list[dict], ys: np.ndarray, device: torch.device) -
     loss_fn = nn.MSELoss()
     total, n = 0.0, 0
     for coords, mask, y in make_batches(records, ys, device, shuffle=False):
-        pred = model(coords, mask)["fold_logit"].float()
+        with _autocast_ctx(device):
+            pred = model(coords, mask)["fold_logit"].float()
         total += loss_fn(pred, y).item() * len(y)
         n += len(y)
     model.train()
@@ -115,19 +82,23 @@ def main():
 
     model = build_model(CKPT, device, pca_path=PCA, pair_init="scaled")
 
-    # Данные: обучающие генераторы + train/val разбиение по скаффолдам
+    # Данные: обучающие генераторы, val — целиком отложенные мотивы
+    collected = {g: collect(g) for g in TRAIN_GENERATORS}
+    all_motifs = {r["motif"] for records, _ in collected.values() for r in records}
+    train_motifs, val_motifs = motif_split(all_motifs)
+    print(f"Мотивов: {len(train_motifs)} в обучении, {len(val_motifs)} отложено "
+          f"под выбор эпохи ({', '.join(sorted(val_motifs))})")
+
     train_records, train_ys = [], []
     val_records, val_ys = [], []
-    for group in TRAIN_GENERATORS:
-        records, ys = collect(group)
-        n_val = int(len(records) * VAL_FRACTION)
-        perm = np.random.permutation(len(records))
-        val_idx, train_idx = perm[:n_val], perm[n_val:]
-        val_records += [records[i] for i in val_idx]
-        val_ys.append(ys[val_idx])
-        train_records += [records[i] for i in train_idx]
-        train_ys.append(ys[train_idx])
-        print(f"{group}: {len(records)} размечено, val={n_val}, train={len(train_idx)}")
+    for group, (records, ys) in collected.items():
+        is_val = np.array([r["motif"] in val_motifs for r in records])
+        val_records += [r for r, v in zip(records, is_val) if v]
+        val_ys.append(ys[is_val])
+        train_records += [r for r, v in zip(records, is_val) if not v]
+        train_ys.append(ys[~is_val])
+        print(f"{group}: {len(records)} размечено, val={int(is_val.sum())}, "
+              f"train={int((~is_val).sum())}")
     train_ys = np.concatenate(train_ys)
     val_ys = np.concatenate(val_ys)
 
@@ -139,7 +110,10 @@ def main():
 
     # Дообучение: голова fold — регрессия log1p(scRMSD), без сигмоиды
     loss_fn = nn.MSELoss()
-    opt = torch.optim.Adam(model.parameters(), lr=LR)
+    # Единый с training/perresidue.py и training/joint.py режим: AdamW с
+    # weight decay, клиппинг нормы, bf16-автокаст. Иначе сравнение стадий
+    # смешивает разрешение метки с режимом оптимизации.
+    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     model.train()
 
     print(f"\nДообучение: {EPOCHS} эпох, lr={LR}, batch={BATCH}, train={len(train_records)}")
@@ -148,10 +122,12 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         total, n = 0.0, 0
         for coords, mask, y in make_batches(train_records, train_ys, device, shuffle=True):
-            opt.zero_grad()
-            pred = model(coords, mask)["fold_logit"].float()
+            opt.zero_grad(set_to_none=True)
+            with _autocast_ctx(device):
+                pred = model(coords, mask)["fold_logit"].float()
             loss = loss_fn(pred, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             total += loss.item() * len(y)
             n += len(y)
@@ -169,7 +145,7 @@ def main():
         OUT,
     )
     print(f"\nЛучшая эпоха по val MSE={best_val:.4f}; сохранено: {os.path.abspath(OUT)}")
-    print("holdout-MSE лучшей эпохи пересчитает analysis_enrichment.py (обогащение, не MSE)")
+    print("holdout-MSE лучшей эпохи пересчитает python -m analysis.enrichment (обогащение, не MSE)")
 
 
 if __name__ == "__main__":

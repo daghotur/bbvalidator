@@ -1,11 +1,11 @@
 """
-analysis_label_choice.py
+analysis/label_choice.py
 ------------------------
 Выбор агрегатора scRMSD по 8 последовательностям: mean против min.
 
 Проблема. docs/07 определяет метрику MotifBench как
     scRMSD = min_k RMSD(X_design, X_pred(s_k)),
-а analysis_scrmsd.py считает rmsd.mean(). Все обученные модели и все числа
+а analysis/scrmsd.py считает rmsd.mean(). Все обученные модели и все числа
 в docs/05 и docs/08 получены против среднего, то есть против величины, которой
 нет ни в спецификации бенчмарка, ни в постановке скрининга.
 
@@ -23,7 +23,7 @@ analysis_label_choice.py
 агрегатов и к min неприменима, поэтому надёжность приводится сырой, на
 половинном бюджете, одинаково для обоих агрегаторов.
 
-Запуск:  python analysis_label_choice.py
+Запуск:  python -m analysis.label_choice
 """
 
 import json
@@ -32,50 +32,37 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from analysis_logits_ranking import EVAL_SOURCES
-from analysis_oracle_ceiling import (
+from common.motifbench import (
+    AGGREGATORS,
     DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    per_sequence_rmsd,
+)
+from common.ranking import (
+    MIN_SAMPLES_PER_MOTIF,
+    MIN_SEQUENCES_FOR_SPLIT,
+    N_SPLITS,
+    RNG_SEED,
     SATURATED_HIGH,
     SATURATED_LOW,
-    load_per_sequence_rmsd,
+    lift_at_top,
+    split_half,
 )
 
-N_SPLITS = 50
-MIN_SAMPLES_PER_MOTIF = 10
-TOP_FRAC = 0.10
-RNG_SEED = 42
-OUT_JSON = "analysis_label_choice.json"
-
-AGGREGATORS = {"mean": np.mean, "min": np.min}
+OUT_JSON = "results/analysis_label_choice.json"
 
 
-def lift(rank_by: np.ndarray, truth: np.ndarray) -> float:
-    """precision@top-10% (ранжируем по rank_by) / base_rate (обе по truth)."""
-    design = truth < DESIGNABLE_MAX_SCRMSD
-    base = design.mean()
-    if base == 0 or base == 1:
-        return np.nan
-    k = max(1, round(TOP_FRAC * len(truth)))
-    return design[np.argsort(rank_by)[:k]].mean() / base
-
-
-def analyse_motif(samples: list[np.ndarray], agg, rng) -> dict | None:
+def analyse_motif(samples: list[np.ndarray], agg, rng) -> dict:
     """Надёжность и потолок агрегатора agg на одном мотиве."""
     full = np.array([agg(s) for s in samples])
     base_rate = float((full < DESIGNABLE_MAX_SCRMSD).mean())
 
     rel, ceil, flip = [], [], []
     for _ in range(N_SPLITS):
-        a, b = [], []
-        for s in samples:
-            idx = rng.permutation(len(s))
-            half = len(s) // 2
-            a.append(agg(s[idx[:half]]))
-            b.append(agg(s[idx[half:]]))
-        a, b = np.array(a), np.array(b)
+        a, b = split_half(samples, agg, rng)
         if len(np.unique(a)) > 1 and len(np.unique(b)) > 1:
             rel.append(spearmanr(a, b)[0])
-        ceil.append(lift(a, b))
+        ceil.append(lift_at_top(a, b < DESIGNABLE_MAX_SCRMSD))
         flip.append(float(
             ((a < DESIGNABLE_MAX_SCRMSD) != (b < DESIGNABLE_MAX_SCRMSD)).mean()
         ))
@@ -93,7 +80,7 @@ def main():
     results = {}
 
     for gen, root in EVAL_SOURCES.items():
-        per_seq = load_per_sequence_rmsd(root)
+        per_seq = per_sequence_rmsd(root, min_sequences=MIN_SEQUENCES_FOR_SPLIT)
         by_motif: dict[str, list[np.ndarray]] = {}
         for (motif, sample), rmsd in per_seq.items():
             by_motif.setdefault(motif, []).append(rmsd)
@@ -104,9 +91,11 @@ def main():
             for motif, samples in by_motif.items():
                 if len(samples) < MIN_SAMPLES_PER_MOTIF:
                     continue
-                r = analyse_motif(samples, agg, rng)
-                if r is not None:
-                    rows.append({"motif": motif, "n": len(samples), **r})
+                rows.append({
+                    "motif": motif,
+                    "n": len(samples),
+                    **analyse_motif(samples, agg, rng),
+                })
             ms = pd.DataFrame(rows)
             kept = ms[(ms["base_rate"] <= SATURATED_HIGH)
                       & (ms["base_rate"] >= SATURATED_LOW)]

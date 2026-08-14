@@ -1,5 +1,5 @@
 """
-analysis_motif_bias.py
+analysis/motif_bias.py
 -----------------------
 Проверяет, не является ли высокая точность верхних топ-K пулового скрининга
 (filter_designability.py, раздел docs/08) артефактом одного насыщенного мотива
@@ -22,7 +22,7 @@ MotifBench, а не тонкой внутримотивной дискримин
 lift (±0.15-0.2 на 5 прогонах) — поэтому pred_scrmsd усредняется по REPEATS
 прогонам перед агрегацией, а не берётся из одного forward pass.
 
-Запуск:  python analysis_motif_bias.py
+Запуск:  python -m analysis.motif_bias
 """
 
 import json
@@ -32,47 +32,25 @@ import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, parse_pdb_files
-from analysis_scrmsd import parse_motifbench_eval
-from inference import _autocast_ctx, build_model, center_coords
+from common.motifbench import (
+    DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    TRAIN_GENERATORS,
+    motif_role,
+    motif_split,
+    scaffold_table,
+)
+from common.ranking import RNG_SEED, SATURATED_HIGH, SATURATED_LOW, precision_at_top
+from common.scoring import score_designability
+from common.structures import motifs_in, parse_pdb_files
+from inference import build_model
 
 RANKING_CKPT = "checkpoints/soft_model.pth"
-SATURATED_HIGH = 0.90
-SATURATED_LOW = 0.10
 TOP_DEPTHS = (10, 30, 50, 100, 200, 500)
 REPEATS = 8  # усреднение pred_scrmsd против прогон-к-прогону CUDA-джиттера
 BOOTSTRAP_N = 1000  # resample по мотивам — вторая (не сглаживаемая усреднением) дисперсия
-RNG_SEED = 42
-OUT_JSON = "analysis_motif_bias.json"
-
-
-@torch.no_grad()
-def score_pred_scrmsd(model, records: list[dict], device: torch.device, batch_size: int = 32) -> pd.DataFrame:
-    """Ранжирующая модель (pure soft): pred_scrmsd = expm1(fold_logit), как в filter_designability.py."""
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
-    rows = [None] * len(records)
-    for start in range(0, len(order), batch_size):
-        batch_idx = order[start : start + batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in batch_idx)
-        B = len(batch_idx)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, idx in enumerate(batch_idx):
-            L = len(records[idx]["coords"])
-            coords[b, :L] = center_coords(records[idx]["coords"])
-            mask[b, :L] = True
-        coords_t = torch.from_numpy(coords).to(device)
-        mask_t = torch.from_numpy(mask).to(device)
-        with _autocast_ctx(device):
-            fold_logit = model(coords_t, mask_t)["fold_logit"].float()
-        pred_scrmsd = torch.clamp(torch.expm1(fold_logit), min=0.0).cpu().numpy()
-        for b, idx in enumerate(batch_idx):
-            rows[idx] = {
-                "sample": records[idx]["sample"].replace(".pdb", ""),
-                "motif": records[idx]["motif"],
-                "pred_scrmsd": float(pred_scrmsd[b]),
-            }
-    return pd.DataFrame(rows)
+OUT_JSON = "results/analysis_motif_bias.json"
 
 
 def per_motif_stats(merged: pd.DataFrame) -> pd.DataFrame:
@@ -80,9 +58,9 @@ def per_motif_stats(merged: pd.DataFrame) -> pd.DataFrame:
     for motif, g in merged.groupby("motif"):
         n = len(g)
         base_rate = g["true_design"].mean()
-        gs = g.sort_values("pred_scrmsd")
-        k10 = max(1, round(0.1 * n))
-        prec10 = gs.head(k10)["true_design"].mean()
+        prec10 = precision_at_top(
+            g["pred_scrmsd"].to_numpy(), g["true_design"].to_numpy()
+        )
         sp_r, sp_p = (np.nan, np.nan)
         if n >= 5 and g["true_scrmsd"].nunique() > 1 and g["pred_scrmsd"].nunique() > 1:
             sp_r, sp_p = spearmanr(g["pred_scrmsd"], g["true_scrmsd"])
@@ -140,24 +118,29 @@ def main():
     model = build_model(RANKING_CKPT, device)
     rng = np.random.default_rng(RNG_SEED)
 
+    all_motifs = set()
+    for g in TRAIN_GENERATORS:
+        all_motifs |= motifs_in(GENERATOR_DIRS[g])
+    _, val_motifs = motif_split(all_motifs)
+
     results = {}
     for gen, scaffold_root in GENERATOR_DIRS.items():
         records, skipped = parse_pdb_files(scaffold_root)
-        gt = parse_motifbench_eval(EVAL_SOURCES[gen]).rename(columns={"motif": "gt_motif"})
-        runs = [score_pred_scrmsd(model, records, device) for _ in range(REPEATS)]
+        gt = scaffold_table(EVAL_SOURCES[gen]).rename(columns={"motif": "gt_motif"})
+        runs = [score_designability(model, records, device) for _ in range(REPEATS)]
         pred = runs[0][["sample", "motif"]].copy()
         pred["pred_scrmsd"] = np.mean([r["pred_scrmsd"].to_numpy() for r in runs], axis=0)
         merged = pred.merge(
             gt[["sample", "sc_rmsd"]], on="sample", how="inner"
         ).rename(columns={"sc_rmsd": "true_scrmsd"})
-        merged["true_design"] = merged["true_scrmsd"] < 2.0
+        merged["true_design"] = merged["true_scrmsd"] < DESIGNABLE_MAX_SCRMSD
         merged = merged.sort_values("pred_scrmsd").reset_index(drop=True)
 
         ms = per_motif_stats(merged)
         saturated = ms[(ms["base_rate"] > SATURATED_HIGH) | (ms["base_rate"] < SATURATED_LOW)]
         kept = ms[(ms["base_rate"] <= SATURATED_HIGH) & (ms["base_rate"] >= SATURATED_LOW)]
 
-        breakdown_path = f"motif_breakdown_{gen.replace('/', '_')}.csv"
+        breakdown_path = f"results/motif_breakdown_{gen.replace('/', '_')}.csv"
         ms.to_csv(breakdown_path, index=False)
 
         boot = bootstrap_median_lift(kept["lift"].to_numpy(), BOOTSTRAP_N, rng)
@@ -179,6 +162,15 @@ def main():
             "bootstrap_lift": boot,
             "depth_composition": depth_composition(merged),
             "breakdown_csv": breakdown_path,
+            # in-sample против невиданного: три генератора из пяти участвовали
+            # в дообучении, и их lift — не обобщение
+            "median_lift_by_role": {
+                role: float(sub["lift"].median())
+                for role, sub in kept.assign(
+                    role=[motif_role(gen, m, val_motifs) for m in kept["motif"]]
+                ).groupby("role")
+                if len(sub)
+            } if len(kept) else {},
         }
         results[gen] = summary
 
@@ -189,6 +181,8 @@ def main():
             print(f"  median lift (n={summary['n_kept']}) = {summary['median_lift_kept']:.2f}x, "
                   f"median Spearman = {summary['median_spearman_kept']:.3f}, "
                   f"значимых p<0.05: {summary['n_significant_kept']}/{summary['n_kept']}")
+            for role, lift in sorted(summary["median_lift_by_role"].items()):
+                print(f"    {role:11}: median lift = {lift:.2f}x")
             print(f"  bootstrap ({BOOTSTRAP_N}x, по мотивам): median={boot['bootstrap_median']:.2f}x, "
                   f"IQR=[{boot['iqr_low']:.2f}, {boot['iqr_high']:.2f}], "
                   f"90% CI=[{boot['ci90_low']:.2f}, {boot['ci90_high']:.2f}]")

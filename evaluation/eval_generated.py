@@ -1,5 +1,5 @@
 """
-eval_generated.py
+evaluation/eval_generated.py
 -----------------
 OOD-оценка архитектур на выходах внешних генераторов (MotifBench-скаффолды):
 структуры, которых не было ни в обучении, ни в синтетических декоях.
@@ -10,12 +10,11 @@ P(foldable) и эпистемическая неопределённость п�
 test-сплита (чтобы видеть, где генераторы на шкале «натив ↔ декоев»).
 
 Запуск:
-    python eval_generated.py                       # полный прогон
-    python eval_generated.py --max-per-generator 30 --mc-runs 4   # смоук
+    python -m evaluation.eval_generated                       # полный прогон
+    python -m evaluation.eval_generated --max-per-generator 30 --mc-runs 4   # смоук
 """
 
 import argparse
-import glob
 import json
 import os
 
@@ -23,35 +22,19 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from common.motifbench import GENERATOR_DIRS
+from common.structures import collect_pdbs, iter_padded_batches
 from dataset.dataloader import make_loader
-from eval_model import build_eval_model
+from evaluation.eval_model import CHECKPOINTS, build_eval_model
 from inference import _autocast_ctx, center_coords, parse_pdb_to_backbone
 from model.heads_loss import predict_with_uncertainty
 
-GENERATOR_DIRS = {
-    "RFdiffusion": "data/ood/rfdiffusion",
-    "RFdiffusion-AA": "data/ood/rfdiffusion_aa",
-    "ODesign-Rigid": "data/ood/odesign_rigid",
-    "EvoDiff": "data/ood/evodiff",
-    "GPDL": "data/ood/gpdl",
-}
 
-CHECKPOINTS = {
-    "hybrid": "checkpoints/best_model.pth",
-    "mlp": "checkpoints/baseline_mlp_best.pth",
-    "gps": "checkpoints/baseline_gps_best.pth",
-}
-
-
-def collect_pdbs(
+def collect_generator_pdbs(
     root: str, max_per_generator: int | None = None, pattern: str = "**/*.pdb"
 ) -> list[str]:
-    files = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-    files = [
-        f
-        for f in files
-        if "__MACOSX" not in f and not os.path.basename(f).startswith("._")
-    ]
+    """Файлы генератора, при необходимости прорежённые равномерно по мотивам."""
+    files = collect_pdbs(root, pattern)
     if max_per_generator is not None and len(files) > max_per_generator:
         # Равномерно по мотивам (round-robin), а не первые попавшиеся
         by_motif: dict[str, list[str]] = {}
@@ -113,25 +96,13 @@ def score_records(
     model, records: list[dict], device: torch.device, mc_runs: int, batch_size: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Батчевый инференс; сортировка по длине минимизирует паддинг."""
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
     p_out = np.zeros(len(records), dtype=np.float32)
     u_out = np.zeros(len(records), dtype=np.float32)
 
-    for start in tqdm(range(0, len(order), batch_size), desc="score", leave=False):
-        idxs = order[start : start + batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=bool)
-        for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = records[i]["coords"]
-            mask[b, :L] = True
-
-        ct = torch.from_numpy(coords).to(device)
-        mt = torch.from_numpy(mask).to(device)
+    batches = list(iter_padded_batches(records, batch_size, device))
+    for idxs, coords, mask in tqdm(batches, desc="score", leave=False):
         with _autocast_ctx(device):
-            res = predict_with_uncertainty(model, ct, mt, mc_runs=mc_runs)
+            res = predict_with_uncertainty(model, coords, mask, mc_runs=mc_runs)
         p_out[idxs] = res["p_foldable"].float().cpu().numpy()
         u_out[idxs] = res["uncertainty"].float().cpu().numpy()
 
@@ -167,7 +138,7 @@ def main():
     parser.add_argument("--n-reference", type=int, default=256)
     parser.add_argument("--manifest", default="dataset/manifest_v1_split.csv")
     parser.add_argument("--pca", default="dataset/pca_components.pth")
-    parser.add_argument("-o", "--output", default="eval_results_generated.json")
+    parser.add_argument("-o", "--output", default="results/eval_results_generated.json")
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
@@ -194,7 +165,7 @@ def main():
         if not os.path.isdir(root):
             print(f"Пропуск {gen}: нет {root}")
             continue
-        files = collect_pdbs(root, args.max_per_generator, pattern=args.pattern)
+        files = collect_generator_pdbs(root, args.max_per_generator, pattern=args.pattern)
         generator_records[gen] = parse_all(files, gen)
         print(f"{gen}: {len(generator_records[gen])} структур")
 

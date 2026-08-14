@@ -34,35 +34,23 @@ dataset/latest/
 # Downloaded external datasets (MotifBench outputs and evaluations)
 data/ood/
 
+# Кластеры последовательностей RCSB (22 МБ, скачиваются dataset/sequence_clusters.py)
+dataset/clusters-by-entity-30.txt
+
 # Generated dataset manifests (reproducible via dataset/make_split.py, seed=42)
 dataset/manifest_v1.csv
-dataset/manifest_v1_split.csv
+dataset/manifest_v1_split*.csv
 
 # Data logs
 *.log
 
-# Evaluation / analysis run outputs (reproducible via eval_*.py and analysis_*.py)
-eval_results_*
-fadiff_self_consistency.csv
-analysis_logits_ranking.csv
-analysis_logits_ranking.json
-analysis_enrichment.csv
-analysis_enrichment.json
-analysis_motif_bias.json
-motif_breakdown_*.csv
-analysis_oracle_ceiling.json
-oracle_ceiling_*.csv
-analysis_label_choice.json
-analysis_relabel.json
-analysis_perresidue.json
-analysis_second_oracle.json
-second_oracle_*.csv
-analysis_baselines.json
-analysis_economics.json
-economics_per_motif.csv
-analysis_length_stress.json
-length_stress_per_sample.csv
-lddt_labels/
+# Прогоны evaluation/ и analysis/ (воспроизводимы запуском этих же скриптов).
+# Сам каталог остаётся в репозитории: скрипты пишут в него без mkdir.
+results/*
+!results/.gitkeep
+
+# По-остаточные метки CA-lDDT (воспроизводимы через training/build_lddt_labels.py)
+dataset/lddt_labels/
 
 # LaTeX build artifacts
 *.aux
@@ -73,3 +61,6 @@ course_work*.pdf
 
 # Coursework texts (kept locally only)
 course_work*.tex
+
+# Логи полного прогона
+logs/

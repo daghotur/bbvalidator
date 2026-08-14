@@ -1,5 +1,5 @@
 """
-analysis_scrmsd.py
+analysis/scrmsd.py
 ------------------
 Корреляция P(foldable) наших моделей с MotifBench self-consistency метриками
 (scRMSD / scTM) по сэмплам внешних генераторов.
@@ -7,82 +7,22 @@ analysis_scrmsd.py
 MotifBench для каждого скаффолда дизайнит 8 последовательностей (ProteinMPNN),
 рефолдит их ESMFold и считает RMSD/TM-score рефолда против скаффолда.
 
-Здесь же живёт SCRMSD_AGG — единая точка определения метки скаффолда для
-всего проекта (обучение, анализы, фильтр).
+Метка скаффолда и её агрегатор определены в common/motifbench.py (SCRMSD_AGG).
 
-Запуск:  python analysis_scrmsd.py
+Запуск:  python -m analysis.scrmsd
 """
 
-import glob
 import json
 import os
 
-import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
-EVAL_SOURCES = {
-    "RFdiffusion": "data/ood/eval_rfdiffusion",
-    "RFdiffusion-AA": "data/ood/eval_rfdiffusion_aa",
-    "ODesign-Rigid": "data/ood/eval_odesign_rigid",
-    "GPDL": "data/ood/eval_gpdl",
-    "EvoDiff": "data/ood/eval_evodiff",
-}
-DETAIL_CSV = "eval_results_generated_detail.csv"
-OUT_JSON = "eval_results_scrmsd.json"
+from common.motifbench import EVAL_SOURCES, scaffold_table
+
+DETAIL_CSV = "results/eval_results_generated_detail.csv"
+OUT_JSON = "results/eval_results_scrmsd.json"
 FIG_DIR = "figures"
-
-# Агрегатор per-sequence RMSD в метку скаффолда — ЕДИНЫЙ для всего проекта.
-# Спецификация MotifBench (docs/07) и постановка скрининга требуют min: остов
-# проходит дорогой фильтр, если свернулась ХОТЬ ОДНА из восьми последовательностей.
-# До 2026-08-13 везде стоял mean — величина, которой нет ни в бенчмарке, ни в
-# постановке: при бимодальном распределении RMSD она измеряет долю удачных
-# последовательностей, а не дизайнируемость остова. Обоснование замены и цена
-# перехода — analysis_label_choice.py.
-SCRMSD_AGG = "min"
-
-
-def parse_motifbench_eval(root: str, agg: str = SCRMSD_AGG) -> pd.DataFrame:
-    """Собирает per-scaffold scRMSD/scTM из всех esm_eval_results.csv.
-
-    scRMSD агрегируется по agg (см. SCRMSD_AGG); scTM — согласованно с ним,
-    то есть берётся у лучшей последовательности, а не усредняется.
-    """
-    rows = []
-    for csv_path in glob.glob(os.path.join(root, "**", "esm_eval_results.csv"), recursive=True):
-        if "__MACOSX" in csv_path:
-            continue
-        parts = csv_path.split(os.sep)
-        # .../<motif>/<sample>/self_consistency/esm_eval_results.csv
-        sample = parts[-3]
-        motif = parts[-4]
-        try:
-            df = pd.read_csv(csv_path)
-        except Exception:
-            continue
-        if "rmsd" not in df.columns or "tm_score" not in df.columns:
-            continue
-        rmsd = pd.to_numeric(df["rmsd"], errors="coerce")
-        tm = pd.to_numeric(df["tm_score"], errors="coerce")
-        ok = rmsd.notna()
-        if not ok.any():
-            continue
-        rmsd, tm = rmsd[ok], tm[ok]
-        if agg == "min":
-            best = rmsd.idxmin()
-            sc_rmsd, sc_tm = float(rmsd.loc[best]), float(tm.loc[best])
-        else:
-            sc_rmsd, sc_tm = float(rmsd.mean()), float(tm.mean())
-        rows.append(
-            {
-                "motif": motif,
-                "sample": sample,
-                "sc_rmsd": sc_rmsd,
-                "sc_tm": sc_tm,
-                "n_seqs": int(len(rmsd)),
-            }
-        )
-    return pd.DataFrame(rows)
 
 
 def correlations(merged: pd.DataFrame) -> dict:
@@ -158,7 +98,7 @@ def main():
     merged_by_group = {}
 
     for group, root in EVAL_SOURCES.items():
-        mb = parse_motifbench_eval(root)
+        mb = scaffold_table(root)
         print(f"{group}: {len(mb)} скаффолдов с self-consistency метриками "
               f"(scRMSD mean={mb['sc_rmsd'].mean():.2f} Å, median={mb['sc_rmsd'].median():.2f})")
 

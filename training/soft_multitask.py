@@ -1,5 +1,5 @@
 """
-train_soft_multitask.py
+training/soft_multitask.py
 -----------------------
 Починка вспомогательных голов после однозадачного soft-дообучения:
 энкодер сдвинулся к ранжирующему представлению, а rmsd/steric/failure_mode
@@ -9,7 +9,7 @@ soft_model.pth двумя потоками:
   A — датасет (manifest_v1_split, train): лоссы вспомогательных голов
       (MSE log1p-RMSD, MSE стерика, CE failure_mode с весами классов);
   B — структуры генераторов с scRMSD: MSE мягкой метки в голову fold
-      (та же цель, что в train_soft.py).
+      (та же цель, что в training/soft.py).
 
 Fold-голова BCE-лосс не получает: она теперь регрессионная. Потоки идут с
 разными lr (вспомогательные головы выше, остальная сеть ниже), чтобы
@@ -20,7 +20,7 @@ log1p(1 Å) (нативная последовательность дизайн�
 якоря fold-голова никогда не видит нативов и предсказывает им мусорные
 значения (слепая зона чистого soft-дообучения).
 
-Запуск:  python train_soft_multitask.py
+Запуск:  python -m training.soft_multitask
 """
 
 import itertools
@@ -29,18 +29,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from common.motifbench import HOLDOUT_GENERATORS, TRAIN_GENERATORS, motif_split
 from dataset.dataloader import get_dataloaders
 from inference import build_model
-from train_model import MANIFEST_PATH, _autocast_ctx, load_failure_class_weights
-from train_soft import (
-    BATCH,
-    HOLDOUT_GENERATORS,
-    OUT as SOFT_CKPT,
-    PCA,
-    TRAIN_GENERATORS,
-    collect,
-    make_batches,
-)
+from training.hybrid import MANIFEST_PATH, _autocast_ctx, load_failure_class_weights
+from training.soft import OUT as SOFT_CKPT
+from training.soft import PCA, collect, make_batches
 
 OUT = "checkpoints/soft_model_mt.pth"
 EPOCHS = 3
@@ -49,9 +43,14 @@ LR_MAIN = 1e-5             # энкодер/пулер/fold-голова
 LR_AUX = 3e-4              # вспомогательные головы
 AUX_BATCH = 64
 SEED = 42
-VAL_FRACTION = 0.1
 NATIVE_SCRMSD_TARGET = 1.0  # Å: натив дизайнуем по построению
 W_NATIVE = 0.25             # вес native-якоря: полный вес ломал ранжирование генераторов
+
+
+def _endless_soft_batches(records, ys, device):
+    """Бесконечный поток soft-батчей: каждый проход перемешивается заново."""
+    while True:
+        yield from make_batches(records, ys, device, shuffle=True)
 
 
 @torch.no_grad()
@@ -88,7 +87,7 @@ def eval_native_pred(model, loader, device, max_batches=100) -> float:
 
 
 @torch.no_grad()
-def eval_aux(model, loader, class_weights, device, max_batches=100) -> dict:
+def eval_aux(model, loader, device, max_batches=100) -> dict:
     model.eval()
     se_rmsd = se_steric = correct = total = 0.0
     for i, batch in enumerate(loader):
@@ -131,15 +130,15 @@ def main():
     )
 
     # Поток B: мягкая метка по структурам генераторов
+    collected = {g: collect(g) for g in TRAIN_GENERATORS}
+    _, val_motifs = motif_split({r["motif"] for recs, _ in collected.values() for r in recs})
     train_records, train_ys, val_records, val_ys = [], [], [], []
-    for group in TRAIN_GENERATORS:
-        records, ys = collect(group)
-        n_val = int(len(records) * VAL_FRACTION)
-        perm = np.random.permutation(len(records))
-        val_records += [records[i] for i in perm[:n_val]]
-        val_ys.append(ys[perm[:n_val]])
-        train_records += [records[i] for i in perm[n_val:]]
-        train_ys.append(ys[perm[n_val:]])
+    for records, ys in collected.values():
+        is_val = np.array([r["motif"] in val_motifs for r in records])
+        val_records += [r for r, v in zip(records, is_val) if v]
+        val_ys.append(ys[is_val])
+        train_records += [r for r, v in zip(records, is_val) if not v]
+        train_ys.append(ys[~is_val])
     train_ys = np.concatenate(train_ys)
     val_ys = np.concatenate(val_ys)
     holdout = {g: collect(g) for g in HOLDOUT_GENERATORS}
@@ -168,7 +167,7 @@ def main():
 
     # Точка отсчёта до дообучения
     soft_val0 = eval_soft(model, val_records, val_ys, device)
-    aux0 = eval_aux(model, val_loader, class_weights, device)
+    aux0 = eval_aux(model, val_loader, device)
     native0 = eval_native_pred(model, val_loader, device)
     print(f"До дообучения: soft val MSE={soft_val0:.4f} | aux: {aux0} | "
           f"предсказание на нативах {native0:.2f} Å (цель {NATIVE_SCRMSD_TARGET:.1f})")
@@ -179,7 +178,9 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         train_loader.batch_sampler.set_epoch(epoch)
         aux_it = itertools.cycle(train_loader)
-        soft_it = itertools.cycle(make_batches(train_records, train_ys, device, shuffle=True))
+        # генератор, а не itertools.cycle: cycle закешировал бы батчи первого
+        # прохода (тензоры на GPU) и до конца эпохи повторял их в том же порядке
+        soft_it = _endless_soft_batches(train_records, train_ys, device)
 
         sums = {"soft": 0.0, "rmsd": 0.0, "steric": 0.0, "fail": 0.0, "native": 0.0}
         for _ in range(STEPS_PER_EPOCH):
@@ -219,7 +220,7 @@ def main():
             sums["fail"] += l_fail.item()
             sums["native"] += l_native.item()
 
-        aux_val = eval_aux(model, val_loader, class_weights, device)
+        aux_val = eval_aux(model, val_loader, device)
         soft_val = eval_soft(model, val_records, val_ys, device)
         native_pred = eval_native_pred(model, val_loader, device)
         h_odesign = eval_soft(model, *holdout["ODesign-Rigid"], device)
@@ -242,7 +243,7 @@ def main():
         OUT,
     )
     print(f"\nСохранено: {OUT} (val soft MSE {final_val:.4f})")
-    print("Финальная проверка: analysis_enrichment.py (ранжирование) и eval_model.py (aux-головы)")
+    print("Финальная проверка: python -m analysis.enrichment (ранжирование)\n      и python -m evaluation.eval_model (aux-головы)")
 
 
 if __name__ == "__main__":

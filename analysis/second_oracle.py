@@ -1,5 +1,5 @@
 """
-analysis_second_oracle.py
+analysis/second_oracle.py
 -------------------------
 Проверка на артефакты оракула: учится ли модель дизайнируемости — или причудам
 конкретного предсказателя структуры.
@@ -24,68 +24,47 @@ MotifBench свернул ТЕ ЖЕ восемь последовательно�
 предсказывает AF2 не хуже, чем сам ESMFold, — значит она забрала общую физику,
 а не идиосинкразию ESMFold. Если сильно меньше — забрала идиосинкразию.
 
-Запуск:  python analysis_second_oracle.py
+Запуск:  python -m analysis.second_oracle
 """
 
-import glob
 import json
-import os
 
 import numpy as np
 import pandas as pd
 import torch
 from scipy.stats import spearmanr
 
-from analysis_label_choice import AGGREGATORS, MIN_SAMPLES_PER_MOTIF, N_SPLITS, TOP_FRAC
-from analysis_logits_ranking import EVAL_SOURCES, GENERATOR_DIRS, parse_pdb_files
-from analysis_oracle_ceiling import DESIGNABLE_MAX_SCRMSD, SATURATED_HIGH, SATURATED_LOW
-from analysis_perresidue import score
-from analysis_scrmsd import SCRMSD_AGG
+from common.motifbench import (
+    AGGREGATORS,
+    DESIGNABLE_MAX_SCRMSD,
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    SCRMSD_AGG,
+    per_sequence_rmsd,
+)
+from common.ranking import (
+    MIN_SAMPLES_PER_MOTIF,
+    MIN_SEQUENCES_FOR_SPLIT,
+    N_SPLITS,
+    RNG_SEED,
+    SATURATED_HIGH,
+    SATURATED_LOW,
+    precision_at_top,
+    split_half,
+)
+from common.scoring import score_designability, score_lookup
+from common.structures import parse_pdb_files
 from inference import build_model
-from train_soft import HOLDOUT_GENERATORS
 
-ORACLE_CSV = {"ESMFold": "esm_eval_results.csv", "AF2": "af2_eval_results.csv"}
-RNG_SEED = 42
-OUT_JSON = "analysis_second_oracle.json"
-
-
-def load_per_sequence(root: str, oracle: str) -> dict:
-    """(motif, sample) -> вектор per-sequence RMSD данного предсказателя."""
-    out = {}
-    for path in glob.glob(
-        os.path.join(root, "**", ORACLE_CSV[oracle]), recursive=True
-    ):
-        if "__MACOSX" in path:
-            continue
-        parts = path.split(os.sep)
-        try:
-            df = pd.read_csv(path)
-        except Exception:
-            continue
-        if "rmsd" not in df.columns:
-            continue
-        v = pd.to_numeric(df["rmsd"], errors="coerce").dropna().to_numpy()
-        if len(v) >= 4:
-            out[(parts[-4], parts[-3])] = v
-    return out
-
-
-def precision_at_top(rank_by: np.ndarray, design: np.ndarray) -> float:
-    k = max(1, round(TOP_FRAC * len(design)))
-    return float(design[np.argsort(rank_by)[:k]].mean())
+OUT_JSON = "results/analysis_second_oracle.json"
 
 
 def oracle_ceiling(samples: list[np.ndarray], agg, rng) -> float:
     """Потолок lift на данной метке: ранжируем половиной A, проверяем половиной B."""
     lifts = []
     for _ in range(N_SPLITS):
-        a, b = [], []
-        for s in samples:
-            idx = rng.permutation(len(s))
-            half = len(s) // 2
-            a.append(agg(s[idx[:half]]))
-            b.append(agg(s[idx[half:]]))
-        a, b = np.array(a), np.array(b)
+        a, b = split_half(samples, agg, rng)
         design_b = b < DESIGNABLE_MAX_SCRMSD
         if design_b.all() or not design_b.any():
             continue
@@ -100,15 +79,14 @@ def main():
 
     results = {}
     for gen, root in EVAL_SOURCES.items():
-        af2 = load_per_sequence(root, "AF2")
+        af2 = per_sequence_rmsd(root, "AF2", MIN_SEQUENCES_FOR_SPLIT)
         if not af2:
             continue
-        esm = load_per_sequence(root, "ESMFold")
+        esm = per_sequence_rmsd(root, "ESMFold", MIN_SEQUENCES_FOR_SPLIT)
         common = sorted(set(esm) & set(af2))
 
         records, _ = parse_pdb_files(GENERATOR_DIRS[gen])
-        pred = score(model, records, device, "fold")
-        lookup = dict(zip(zip(pred["motif"], pred["sample"]), pred["pred_scrmsd"]))
+        lookup = score_lookup(score_designability(model, records, device, "fold"))
 
         by_motif: dict[str, list] = {}
         for key in common:
@@ -146,7 +124,7 @@ def main():
             rows.append(row)
 
         ms = pd.DataFrame(rows)
-        out_csv = f"second_oracle_{gen.replace('/', '_')}.csv"
+        out_csv = f"results/second_oracle_{gen.replace('/', '_')}.csv"
         ms.to_csv(out_csv, index=False)
 
         res = {"n_motifs": int(len(ms)), "n_samples": int(ms["n"].sum()),

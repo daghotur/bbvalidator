@@ -1,9 +1,9 @@
 """
-train_joint.py
+training/joint.py
 --------------
 Совместное обучение: по-остаточный lDDT + глобальная мягкая метка log1p(scRMSD).
 
-Зачем именно так (результат train_perresidue.py): чистая по-остаточная
+Зачем именно так (результат training/perresidue.py): чистая по-остаточная
 супервизия подняла внутримотивное ранжирование там, где локальное окружение
 и глобальное RMSD согласованы (RFdiffusion 0.32 → 0.51, холдаут ODesign
 0.30 → 0.38), но просела на EvoDiff, где эта связь слабая: внутримотивный
@@ -14,25 +14,38 @@ Spearman(mean lDDT, scRMSD) там всего −0.48 против −0.86…−
 против 8.1k структур) для тонкой дискриминации + прямой глобальный таргет,
 сохраняющий динамический диапазон там, где lDDT расходится с scRMSD.
 
-Два выхода для ранжирования, сравниваются в analysis_perresidue.py:
+Два выхода для ранжирования, сравниваются в analysis/perresidue.py:
   * fold_logit → expm1 — предсказанный scRMSD (прямая супервизия);
   * mean sigmoid(lddt_logit) — агрегат по-остаточного предсказания.
 
-Протокол тот же, что у train_soft.py и train_perresidue.py (старт из
+Данные те же, что у training/soft.py и training/perresidue.py (старт из
 best_model.pth, обучение на RFdiffusion + RFdiffusion-AA + EvoDiff, 90/10,
-холдаут ODesign-Rigid и GPDL) — чтобы разница была в супервизии, не в данных.
+холдаут ODesign-Rigid и GPDL). Оптимизация — НЕ та же: здесь AdamW с
+weight_decay 1e-4, клиппингом нормы 1.0, bf16-автокастом и 45 эпохами, тогда
+как training/soft.py учится Adam'ом без регуляризации и клиппинга, в fp32 и
+за 20 эпох. Поэтому сравнение «joint против soft» смешивает разрешение метки
+с режимом оптимизации; чтобы приписать разницу супервизии, обе стадии нужно
+переобучить под одним протоколом (docs/03).
 
-Запуск:  python train_joint.py
+Запуск:  python -m training.joint
 """
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from analysis_logits_ranking import GENERATOR_DIRS, parse_pdb_files
-from inference import _autocast_ctx, build_model, center_coords
-from train_perresidue import load_labels, masked_bce
-from train_soft import EVAL_ROOTS, HOLDOUT_GENERATORS, PCA, TRAIN_GENERATORS, parse_scrmsd
+from common.motifbench import (
+    EVAL_SOURCES,
+    GENERATOR_DIRS,
+    HOLDOUT_GENERATORS,
+    TRAIN_GENERATORS,
+    motif_split,
+    scrmsd_by_scaffold,
+)
+from common.structures import iter_padded_batches, parse_pdb_files
+from inference import _autocast_ctx, build_model
+from training.perresidue import load_labels, masked_bce
+from training.soft import PCA
 
 CKPT = "checkpoints/best_model.pth"
 OUT = "checkpoints/joint_model.pth"
@@ -40,7 +53,6 @@ OUT = "checkpoints/joint_model.pth"
 EPOCHS = 45
 LR = 5e-5
 BATCH = 32
-VAL_FRACTION = 0.1
 SEED = 42
 W_RESIDUE = 1.0
 W_GLOBAL = 1.0
@@ -50,7 +62,7 @@ def collect(generator: str) -> list[dict]:
     """Структуры, у которых есть ОБЕ метки: по-остаточная и глобальная."""
     records, _ = parse_pdb_files(GENERATOR_DIRS[generator])
     lddt = load_labels(generator)
-    scrmsd = parse_scrmsd(EVAL_ROOTS[generator])
+    scrmsd = scrmsd_by_scaffold(EVAL_SOURCES[generator])
     kept, skipped = [], 0
     for r in records:
         sample = r["sample"].removesuffix(".pdb")
@@ -65,25 +77,17 @@ def collect(generator: str) -> list[dict]:
 
 
 def make_batches(records: list[dict], device: torch.device, shuffle: bool):
-    n = len(records)
-    order = np.random.permutation(n) if shuffle else np.arange(n)
-    for start in range(0, n, BATCH):
-        idxs = order[start : start + BATCH]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        t_res = np.zeros((B, Lmax), dtype=np.float32)
-        t_glob = np.zeros((B,), dtype=np.float32)
+    """Батчи (coords, mask, по-остаточный таргет, глобальный таргет)."""
+    order = "shuffle" if shuffle else "sequential"
+    for idxs, coords, mask in iter_padded_batches(records, BATCH, device, order=order):
+        t_res = np.zeros(tuple(mask.shape), dtype=np.float32)
+        t_glob = np.zeros((len(idxs),), dtype=np.float32)
         for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = center_coords(records[i]["coords"])
-            mask[b, :L] = True
-            t_res[b, :L] = records[i]["lddt"]
+            t_res[b, : len(records[i]["lddt"])] = records[i]["lddt"]
             t_glob[b] = records[i]["log_scrmsd"]
         yield (
-            torch.from_numpy(coords).to(device),
-            torch.from_numpy(mask).to(device),
+            coords,
+            mask,
             torch.from_numpy(t_res).to(device),
             torch.from_numpy(t_glob).to(device),
         )
@@ -114,14 +118,17 @@ def main():
     print(f"Устройство: {device} | веса лосса: остатки {W_RESIDUE}, глобальный {W_GLOBAL}")
 
     print("Сбор обучающих генераторов:")
+    collected = {gen: collect(gen) for gen in TRAIN_GENERATORS}
+    train_motifs, val_motifs = motif_split(
+        {r["motif"] for recs in collected.values() for r in recs}
+    )
+    print(f"Мотивов: {len(train_motifs)} в обучении, {len(val_motifs)} отложено "
+          f"под выбор эпохи ({', '.join(sorted(val_motifs))})")
+
     train_records, val_records = [], []
-    rng = np.random.default_rng(SEED)
-    for gen in TRAIN_GENERATORS:
-        recs = collect(gen)
-        idx = rng.permutation(len(recs))
-        n_val = int(len(recs) * VAL_FRACTION)
-        val_records += [recs[i] for i in idx[:n_val]]
-        train_records += [recs[i] for i in idx[n_val:]]
+    for gen, recs in collected.items():
+        val_records += [r for r in recs if r["motif"] in val_motifs]
+        train_records += [r for r in recs if r["motif"] not in val_motifs]
 
     n_labels = sum(len(r["lddt"]) for r in train_records)
     print(f"train {len(train_records)} структур / {n_labels} по-остаточных меток "

@@ -1,5 +1,5 @@
 """
-train_model.py
+training/hybrid.py
 --------------
 Обучение ProteinScoreModel (HybridProteinEncoder + мультизадачные головы).
 
@@ -246,7 +246,7 @@ def main():
 
     # 4. Данные (бакетизация по длине, сид сэмплера = SEED)
     print(f"Загрузка данных из {MANIFEST_PATH}...")
-    train_loader, val_loader, test_loader = get_dataloaders(
+    train_loader, val_loader, _ = get_dataloaders(
         MANIFEST_PATH,
         batch_size=config["batch_size"],
         num_workers=8,
