@@ -28,7 +28,7 @@ python -m preprocess.fit_pca       # 5. PCA фронтенда → dataset/pca_c
 ## Обучение
 
 ```bash
-python train_model.py                          # гибрид (d_model=192)
+python -m training.hybrid                          # гибрид (d_model=192)
 python baselines/train_baseline.py --encoder mlp
 python baselines/train_baseline.py --encoder gps
 ```
@@ -40,7 +40,7 @@ python baselines/train_baseline.py --encoder gps
 **Полная батарея на сплите** (test по умолчанию):
 
 ```bash
-python eval_model.py -c checkpoints/best_model.pth --split test -o eval_results_hybrid.json
+python -m evaluation.eval_model -c checkpoints/best_model.pth --split test -o results/eval_results_hybrid.json
 ```
 
 Метрики: Accuracy, ROC-AUC, PR-AUC, ECE, precision/recall; per-strategy (specificity + AUC «нативы против семейства»); confusion 6×6 failure_mode; MSE auxiliary-голов. Архитектура чекпоинта (гибрид/MLP/GPS) определяется автоматически по ключам state_dict.
@@ -48,10 +48,10 @@ python eval_model.py -c checkpoints/best_model.pth --split test -o eval_results_
 **Скоринг выходов внешних генераторов** (OOD):
 
 ```bash
-python eval_generated.py \
+python -m evaluation.eval_generated \
     --dirs "RFdiffusion=data/ood/rfdiffusion" \
     --pattern "**/*.pdb" \
-    -o eval_results_generated.json
+    -o results/eval_results_generated.json
 ```
 
 Для каждой структуры: P(fold) + MC-Dropout неопределённость; плюс референсные группы native/decoy из test. Скрипт знает стандартные MotifBench-директории в `data/ood/` и запускается без `--dirs`.
@@ -59,21 +59,21 @@ python eval_generated.py \
 **Корреляция с ground-truth качеством** (MotifBench self-consistency):
 
 ```bash
-python analysis_scrmsd.py        # Spearman/Pearson P(fold) ↔ scRMSD по генераторам + графики
+python -m analysis.scrmsd        # Spearman/Pearson P(fold) ↔ scRMSD по генераторам + графики
 ```
 
-**Метка проекта.** scRMSD скаффолда = $\min_k$ по восьми последовательностям (спецификация MotifBench, docs/07). Агрегатор задан один раз константой `SCRMSD_AGG` в `analysis_scrmsd.py`; её берут и парсеры анализов, и обучающие скрипты, поэтому определение метки не может разъехаться между ними.
+**Метка проекта.** scRMSD скаффолда = $\min_k$ по восьми последовательностям (спецификация MotifBench, docs/07). Агрегатор задан один раз константой `SCRMSD_AGG` в `common/motifbench.py`; там же лежит единственный парсер `*_eval_results.csv`, которым пользуются и анализы, и обучающие скрипты, поэтому определение метки не может разъехаться между ними.
 
 **Анализы поверх меток** (все пишут JSON + CSV, обучения не требуют):
 
 ```bash
-python analysis_label_choice.py   # выбор агрегатора: mean против min, цена перехода
-python analysis_oracle_ceiling.py # потолок оракула, split-half по последовательностям
-python analysis_relabel.py        # ранжирование моделей против потолка
-python analysis_motif_bias.py     # внутримотивный lift, исключение насыщенных мотивов
-python analysis_second_oracle.py  # перенос на AF2 как независимый рефолдер
-python analysis_baselines.py      # дешёвые бейзлайны против модели
-python analysis_economics.py      # экономия дорогих проверок по сложности мишени
+python -m analysis.label_choice   # выбор агрегатора: mean против min, цена перехода
+python -m analysis.oracle_ceiling # потолок оракула, split-half по последовательностям
+python -m analysis.relabel        # ранжирование моделей против потолка
+python -m analysis.motif_bias     # внутримотивный lift, исключение насыщенных мотивов
+python -m analysis.second_oracle  # перенос на AF2 как независимый рефолдер
+python -m analysis.baselines      # дешёвые бейзлайны против модели
+python -m analysis.economics      # экономия дорогих проверок по сложности мишени
 ```
 
 ## Инференс отдельных PDB
@@ -100,19 +100,19 @@ python inference.py -i structure.pdb --cpu -m 32                        # CPU, 3
 `filter_designability.py` батчево скорит каталог структур и для каждой выдаёт вердикт PASS/FAIL со списком заваленных гейтов. Две модели с разделёнными ролями (раздел 5.4): ранжирование и вердикт — `soft_model.pth` (мягкая метка log1p(scRMSD), детерминированный скор, без сигмоиды и MC-усреднения); диагностика похожести на натив — `soft_model_mt.pth` (мультизадачное дообучение с native-якорем: калиброванный scRMSD, RMSD aux-головы, стерика, failure mode), диагностические колонки в вердикте не участвуют, расхождение моделей помечается маркером:
 
 ```bash
-python filter_designability.py -i data/ood/rfdiffusion/scaffolds --max-scrmsd 2.0 -o rfdiff_filter.csv
+python filter_designability.py -i data/ood/rfdiffusion/scaffolds --max-scrmsd 2.0 -o results/rfdiff_filter.csv
 ```
 
 Обязательный гейт — `--max-scrmsd` в шкале ранжирующей модели. Пороги пересчитаны после перехода на метку $\min_k$ (docs/05, 5.6) и сместились вниз; на потоке RFdiffusion:
 
 | порог, Å | покрытие | точность |
 |---:|---:|---:|
-| 1.0 | 8.2% | 0.988 |
-| 1.5 | 22.8% | 0.937 |
-| 2.0 | 44.0% | 0.883 |
-| 3.0 | 81.5% | 0.782 |
+| 1.0 | 27.1% | 0.966 |
+| 1.5 | 54.1% | 0.896 |
+| 2.0 | 73.6% | 0.830 |
+| 3.0 | 93.2% | 0.745 |
 
-То есть 1.0–1.5 Å — консервативный режим, 2.0 Å — режим покрытия. Прежние значения (2.0 Å → покрытие 0.6–10%, 3.5 Å → до 28%) относились к шкале среднего scRMSD и недействительны. Опциональные: `--max-clashes` (сырые конфликты геометрии Cβ < 3.5 Å, |i-j| ≥ 3), `--max-uncertainty` (MC-дисперсия ранжирующей модели, только при `--mc-runs > 1`). Независимо от гейтов verbose-вывод и CSV содержат все метрики: pred scRMSD, MC-дисперсию, диагностику похожести на натив, вероятность стерики, RMSD aux-головы, failure mode, сырые счётчики конфликтов и H-связей.
+То есть 1.0 Å — консервативный режим, 2.0 Å — режим покрытия. **Пороги привязаны к конкретному чекпоинту**: шкала предсказаний сдвигается при каждом переобучении (в прогоне 13.08 те же 2.0 Å давали 44% покрытия), поэтому переносить значения между версиями весов нельзя — таблицу нужно перестраивать прогоном фильтра на потоке. Опциональные: `--max-clashes` (сырые конфликты геометрии Cβ < 3.5 Å, |i-j| ≥ 3), `--max-uncertainty` (MC-дисперсия ранжирующей модели, только при `--mc-runs > 1`). Независимо от гейтов verbose-вывод и CSV содержат все метрики: pred scRMSD, MC-дисперсию, диагностику похожести на натив, вероятность стерики, RMSD aux-головы, failure mode, сырые счётчики конфликтов и H-связей.
 
 ## Интерактивные тетрадки
 
@@ -129,7 +129,7 @@ uv run jupyter lab     # jupyterlab ставится dev-зависимость�
 ## Бенчмарк скорости
 
 ```bash
-python benchmark.py -i data/3MYC.pdb -c checkpoints/best_model.pth -m 16 -n 50
+python -m evaluation.benchmark -i data/3MYC.pdb -c checkpoints/best_model.pth -m 16 -n 50
 ```
 
 5 прогревочных + `n` замеров, `m` MC-проходов; физический фронтенд считается один раз на структуру.

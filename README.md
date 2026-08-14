@@ -64,13 +64,48 @@ flowchart TD
 
 ## Структура репозитория
 
+Пакеты запускаются как модули из корня репозитория: `python -m training.hybrid`,
+`python -m evaluation.eval_model`, `python -m analysis.scrmsd`. В корне лежат только
+две пользовательские CLI-утилиты.
+
 ```text
 .
-├── train_model.py              # Обучение основной модели (селекция по (AUC+PR-AUC)/2)
-├── eval_model.py               # Полная батарея метрик на сплите (JSON + markdown)
-├── inference.py                # CLI-инференс PDB-файлов с MC-Dropout
-├── benchmark.py                # Замеры латентности/пропускной способности
-├── filter_designability.py     # Фильтр по дизайнуемости: PASS/FAIL + заваленные метрики
+├── inference.py                    # CLI-инференс PDB-файлов с MC-Dropout
+├── filter_designability.py         # Фильтр по дизайнуемости: PASS/FAIL + заваленные метрики
+│
+├── training/
+│   ├── hybrid.py                   # Обучение основной модели (селекция по (AUC+PR-AUC)/2)
+│   ├── soft.py                     # Дообучение на мягкую метку log1p(scRMSD)
+│   ├── soft_multitask.py           # Мультизадачная починка aux-голов + native-якорь
+│   ├── perresidue.py               # Дообучение только на по-остаточную метку CA-lDDT
+│   ├── joint.py                    # Совместный лосс: по-остаточный lDDT + глобальный scRMSD
+│   └── build_lddt_labels.py        # По-остаточная метка CA-lDDT из рефолдов MotifBench
+│
+├── evaluation/
+│   ├── eval_model.py               # Полная батарея метрик на сплите (JSON + markdown)
+│   ├── eval_generated.py           # Скоринг выходов внешних генераторов (OOD)
+│   └── benchmark.py                # Замеры латентности/пропускной способности
+│
+├── analysis/                       # Воспроизводимые анализы, пишут в results/
+│   ├── scrmsd.py                   # Корреляция P(fold) ↔ scRMSD по генераторам
+│   ├── logits_ranking.py           # Насыщение выхода против потери сигнала
+│   ├── enrichment.py               # Фактор обогащения скрининга
+│   ├── oracle_ceiling.py           # Потолок оракула, split-half по последовательностям
+│   ├── label_choice.py             # Выбор агрегатора scRMSD: mean против min
+│   ├── relabel.py                  # Перемер моделей под исправленной меткой
+│   ├── motif_bias.py               # Внутримотивный lift, исключение насыщенных мотивов
+│   ├── perresidue.py               # Сравнение режимов супервизии soft / perres / joint
+│   ├── second_oracle.py            # Перенос на AF2 как независимый рефолдер
+│   ├── baselines.py                # Дешёвые бейзлайны против модели
+│   ├── economics.py                # Экономия дорогих проверок по сложности мишени
+│   ├── length_stress.py            # Стресс-тест по длине 50–1000 (Scaffold-Lab)
+│   └── fadiff_sc.py                # Self-consistency выходов собственного генератора
+│
+├── common/                         # Общий слой для training/, evaluation/, analysis/
+│   ├── motifbench.py               # Пути MotifBench, SCRMSD_AGG, парсер *_eval_results.csv
+│   ├── structures.py               # Чтение PDB и сборка батчей с паддингом
+│   ├── scoring.py                  # Скор модели в единицах «меньше = дизайнируемее»
+│   └── ranking.py                  # precision@top, lift, деление метки пополам
 │
 ├── dataset/
 │   ├── build_positive_dataset.py   # Сбор нативных структур через RCSB API
@@ -79,16 +114,17 @@ flowchart TD
 │   ├── make_split.py               # Манифесты и сплиты по group_id (анти-утечка)
 │   ├── dataloader.py               # HDF5 DataLoader, бакетизация по длине
 │   ├── manifest_v1_split.csv       # source_h5 — относительные пути
+│   ├── lddt_labels/                # По-остаточные метки CA-lDDT (git-ignored)
 │   └── *.h5                        # данные (git-ignored)
 │
 ├── preprocess/
 │   ├── biophys_frontend.py         # Оркестратор извлечения признаков
 │   ├── geometry_features.py        # Торсионы, виртуальные Cβ/O, клэши, H-связи
-│   ├── designability_features.py     # Упаковка, экспонированность, PCA фрагментов
+│   ├── designability_features.py   # Упаковка, экспонированность, PCA фрагментов
 │   ├── pair_features.py            # Парные признаки и kNN-граф
 │   ├── fit_pca.py                  # Fit PCA по нативным структурам
 │   ├── test_geometry.py            # Тесты геометрии (pytest)
-│   ├── test_designability.py         # Тесты designability-признаков (pytest)
+│   ├── test_designability.py       # Тесты designability-признаков (pytest)
 │   └── conftest.py                 # pytest-фикстуры
 │
 ├── model/
@@ -96,11 +132,15 @@ flowchart TD
 │   ├── heads_loss.py               # Пулинг, головы, Dynamic Multi-Task Loss, MC-Dropout
 │   └── metrics.py                  # ROC-AUC, PR-AUC, ECE (numpy/scipy)
 │
-├── notebooks/                  # Jupyter-тетрадки: как работает, метрики, бенчмарк
+├── baselines/
+│   ├── encoders.py                 # BaselineMLPEncoder, BaselineGPSEncoder
+│   └── train_baseline.py           # Обучение базлайнов по тому же протоколу
 │
-└── baselines/
-    ├── encoders.py                 # BaselineMLPEncoder, BaselineGPSEncoder
-    └── train_baseline.py           # Обучение базлайнов по тому же протоколу
+├── checkpoints/                    # Веса моделей
+├── results/                        # Выводы evaluation/ и analysis/ (git-ignored)
+├── figures/                        # Графики анализов
+├── docs/                           # Документация проекта
+└── notebooks/                      # Jupyter-тетрадки: как работает, метрики, бенчмарк
 ```
 
 ---
@@ -230,7 +270,7 @@ $$L = \sum_i \left[ \frac{L_i}{2\sigma_i^2} + \log \sigma_i \right] = \sum_i \le
 ## Обучение
 
 ```bash
-python train_model.py
+python -m training.hybrid
 ```
 
 | Параметр | Значение | Описание |
@@ -270,7 +310,7 @@ python baselines/train_baseline.py --encoder gps   # GPSConv (TransformerConv + 
 ## Оценка
 
 ```bash
-python eval_model.py -c checkpoints/best_model.pth --split test -o eval_results.json
+python -m evaluation.eval_model -c checkpoints/best_model.pth --split test -o results/eval_results.json
 ```
 
 Батарея метрик на test-сплите:
@@ -320,7 +360,7 @@ python inference.py -i structure.pdb --cpu -m 32
 Обязательный гейт — `--max-scrmsd` (в шкале ранжирующей модели). Гейт 2.0 Å — консервативный режим: прошедшие дизайнируемы с вероятностью 0.74–0.96 при покрытии 0.6–10% (зависит от генератора); гейт 3.5 Å — режим покрытия (точность ~0.6, до 28%). Опциональные гейты: `--max-clashes` (сырые конфликты геометрии), `--max-uncertainty` (при `--mc-runs > 1`):
 
 ```bash
-python filter_designability.py -i data/ood/rfdiffusion/scaffolds --max-scrmsd 3.5 -o rfdiff_filter.csv
+python filter_designability.py -i data/ood/rfdiffusion/scaffolds --max-scrmsd 3.5 -o results/rfdiff_filter.csv
 ```
 
 ```
@@ -344,7 +384,7 @@ python filter_designability.py -i data/ood/rfdiffusion/scaffolds --max-scrmsd 3.
 Бенчмарк скорости:
 
 ```bash
-python benchmark.py -i data/3MYC.pdb -c checkpoints/best_model.pth -m 16 -n 50
+python -m evaluation.benchmark -i data/3MYC.pdb -c checkpoints/best_model.pth -m 16 -n 50
 ```
 
 Результаты замеров (RTX 3080, bf16-автокаст, `best_model.pth`, B=1, 5 прогревочных + 50 замеров):
