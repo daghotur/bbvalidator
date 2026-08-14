@@ -4,7 +4,7 @@ baselines/train_baseline.py
 Обучение базлайнов (MLP / GPS) по тому же протоколу, что и основная модель:
 тот же фронтенд с PCA, тот же пулинг/головы/динамический лосс, те же сиды,
 бакеты по длине и селекция по (Val AUC + PR-AUC)/2. Цикл обучения переиспользуется
-из train_model.py — отличается только энкодер.
+из training/hybrid.py — отличается только энкодер.
 
 Запуск:
     python baselines/train_baseline.py --encoder mlp
@@ -23,7 +23,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from preprocess.pair_features import PairFeatureBuilder
 
-import train_model as tm
+from training import hybrid as tm
 from baselines.encoders import BaselineGPSEncoder, BaselineMLPEncoder
 from dataset.dataloader import get_dataloaders
 from model.heads_loss import (

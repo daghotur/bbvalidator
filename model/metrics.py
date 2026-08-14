@@ -6,7 +6,7 @@ model/metrics.py
   • average_precision_score — PR-AUC (интерполяция по PR-кривой)
   • expected_calibration_error — калибровка вероятностей (равные бины)
 
-Используются в цикле селекции модели (train_model.py) и в eval_model.py.
+Используются в цикле селекции модели (training/hybrid.py) и в evaluation/eval_model.py.
 """
 
 import numpy as np

@@ -20,7 +20,12 @@ PASS/FAIL и показывает, какие конкретно метрики 
 
 Обязательный гейт — --max-scrmsd (по ранжирующей модели). Опциональные:
 --max-clashes (сырые конфликты геометрии, модельно-независимые) и
---max-uncertainty (MC-дисперсия ранжирующей модели, при --mc-runs > 1).
+--max-uncertainty (при --mc-runs > 1).
+
+Единицы колонки uncertainty: дисперсия предсказанного log1p(scRMSD) по
+MC-проходам. В evaluation/eval_generated.py колонка с тем же именем — это
+дисперсия ВЕРОЯТНОСТИ бинарной модели (≤ 0.25). Числа из двух артефактов
+несравнимы между собой.
 
 Примеры:
     python filter_designability.py -i data/ood/evodiff/scaffolds/01_1LDB
@@ -29,13 +34,14 @@ PASS/FAIL и показывает, какие конкретно метрики 
 """
 
 import argparse
-import glob
 import os
 
 import numpy as np
 import torch
 
+from common.structures import collect_pdbs, iter_padded_batches
 from inference import _autocast_ctx, build_model, center_coords, parse_pdb_to_backbone
+from model.heads_loss import mc_fold_logits
 
 # Классы failure_mode по FAILURE_MODE_MAP из dataset/build_negative_dataset.py
 FAILURE_MODE_NAMES = [
@@ -47,26 +53,6 @@ FAILURE_MODE_NAMES = [
     "unknown",           # 5: зарезервирован под OOD-негативы
 ]
 DIAG_NOT_NATIVE_LIKE_A = 4.0  # маркер расхождения: PASS по рангу, но диагностика далеко от натива
-
-
-def collect_pdbs(input_path: str, pattern: str) -> list[str]:
-    if os.path.isfile(input_path):
-        return [input_path]
-    files = sorted(glob.glob(os.path.join(input_path, pattern), recursive=True))
-    return [
-        f
-        for f in files
-        if "__MACOSX" not in f and not os.path.basename(f).startswith("._")
-    ]
-
-
-def _mc_dropout_modules(model):
-    return [
-        m
-        for parent in (model.encoder, model.heads)
-        for m in parent.modules()
-        if m.__class__.__name__.startswith("Dropout")
-    ]
 
 
 @torch.no_grad()
@@ -93,17 +79,11 @@ def score_batch(
         steric = torch.sigmoid(dp["steric"]).float()
         fm_logits = dp["failure_mode"].float()
 
-        # 3) Неопределённость ранжирующей модели (опционально)
+        # 3) Неопределённость ранжирующей модели (опционально).
+        # Физика внутри считается один раз на все проходы (см. mc_fold_logits).
         uncertainty = torch.zeros(coords.shape[0], device=device)
         if mc_runs > 1:
-            dropouts = _mc_dropout_modules(model)
-            saved = [d.training for d in dropouts]
-            for d in dropouts:
-                d.train()
-            runs = [model(coords, mask)["fold_logit"].float() for _ in range(mc_runs)]
-            for d, st in zip(dropouts, saved):
-                d.training = st
-            uncertainty = torch.stack(runs).var(dim=0)
+            uncertainty = mc_fold_logits(model, coords, mask, mc_runs).float().var(dim=0)
 
     fm_prob = torch.softmax(fm_logits, dim=-1)
     fm_p, fm_idx = fm_prob.max(dim=-1)
@@ -153,8 +133,10 @@ def main():
     parser.add_argument("--max-clashes", type=int, default=None,
                         help="гейт по сырому числу стерических конфликтов (Cβ < 3.5 Å, |i-j| >= 3)")
     parser.add_argument("--max-uncertainty", type=float, default=None,
-                        help="гейт по MC-дисперсии ранжирующей модели (только при --mc-runs > 1)")
-    parser.add_argument("-o", "--output", default="filter_results.csv")
+                        help="гейт по MC-дисперсии предсказанного log1p(scRMSD) "
+                             "(только при --mc-runs > 1; это НЕ дисперсия вероятности, "
+                             "как в evaluation/eval_generated.py)")
+    parser.add_argument("-o", "--output", default="results/filter_results.csv")
     parser.add_argument("--quiet", action="store_true",
                         help="не печатать построчный вердикт, только сводку")
     parser.add_argument("--cpu", action="store_true")
@@ -192,26 +174,11 @@ def main():
     print(f"Распарсено: {len(records)} (пропущено: {skipped})")
 
     # Батчевый скоринг с сортировкой по длине (меньше паддинг)
-    order = sorted(range(len(records)), key=lambda i: len(records[i]["coords"]))
     rows: list[dict] = []
-    for start in range(0, len(order), args.batch_size):
-        idxs = order[start : start + args.batch_size]
-        Lmax = max(len(records[i]["coords"]) for i in idxs)
-        B = len(idxs)
-        coords = np.zeros((B, Lmax, 3, 3), dtype=np.float32)
-        mask = np.zeros((B, Lmax), dtype=np.bool_)
-        for b, i in enumerate(idxs):
-            L = len(records[i]["coords"])
-            coords[b, :L] = records[i]["coords"]
-            mask[b, :L] = True
-        res = score_batch(
-            model,
-            diag_model,
-            torch.from_numpy(coords).to(device),
-            torch.from_numpy(mask).to(device),
-            device,
-            args.mc_runs,
-        )
+    for idxs, coords, mask in iter_padded_batches(
+        records, args.batch_size, device
+    ):
+        res = score_batch(model, diag_model, coords, mask, device, args.mc_runs)
         for b, i in enumerate(idxs):
             r = {k: v[b] for k, v in res.items()}
             r["path"] = records[i]["path"]

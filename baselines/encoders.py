@@ -47,7 +47,7 @@ class BaselineGPSEncoder(nn.Module):
     def __init__(
         self,
         node_in_dim: int = 31,
-        pair_in_dim: int = 20,
+        pair_in_dim: int = 29,  # PairFeatureBuilder.feature_dim
         d_model: int = 128,
         heads: int = 4,
         num_layers: int = 2,

@@ -195,8 +195,7 @@ def benchmark(proxy, device, B: int = 4096, N: int = 200, reps: int = 10):
     start = time.perf_counter()
     with torch.inference_mode():
         for _ in range(reps):
-            feats  = proxy(coords, mask)
-            packed = DesignabilityProxies.pack_for_mlp(feats)
+            DesignabilityProxies.pack_for_mlp(proxy(coords, mask))
 
     if device.type == "cuda":
         torch.cuda.synchronize()

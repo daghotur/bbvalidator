@@ -78,9 +78,10 @@ class LengthBucketBatchSampler:
     def __iter__(self) -> Iterator[List[int]]:
         rng = np.random.default_rng(self.seed + self.epoch)
 
+        buckets = self._bucket_indices()
         batches: List[List[int]] = []
-        for bucket in sorted(self._bucket_indices()):
-            idx = self._bucket_indices()[bucket]
+        for bucket in sorted(buckets):
+            idx = buckets[bucket]
             if self.shuffle:
                 rng.shuffle(idx)
             for start in range(0, len(idx), self.batch_size):

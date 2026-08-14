@@ -262,8 +262,7 @@ def benchmark(extractor, device, B: int = 4096, N: int = 200, reps: int = 10):
     start = time.perf_counter()
     with torch.inference_mode():
         for _ in range(reps):
-            feats = extractor(coords)
-            packed = extractor.pack_for_mlp(feats)
+            extractor.pack_for_mlp(extractor(coords))
 
     if device.type == "cuda":
         torch.cuda.synchronize()

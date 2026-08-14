@@ -33,24 +33,27 @@ class BackboneGeometryExtractor(nn.Module):
         return torch.atan2(y, x) * (180.0 / torch.pi)
 
     @staticmethod
-    def _pad_right_and_mask(
-        tensor: torch.Tensor, seq_len: int, pad_val: float = 0.0
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Паддинг справа до seq_len; маска True для исходных позиций (0..L-1)."""
-        L = tensor.shape[1]
-        pad = F.pad(tensor, (0, seq_len - L), value=pad_val)
-        mask = torch.zeros(
-            tensor.shape[0], seq_len, dtype=torch.bool, device=tensor.device
-        )
-        mask[:, :L] = True
-        return pad, mask
+    def _pad_right(tensor: torch.Tensor, seq_len: int, pad_val: float = 0.0) -> torch.Tensor:
+        """Паддинг справа до seq_len."""
+        return F.pad(tensor, (0, seq_len - tensor.shape[1]), value=pad_val)
 
     @staticmethod
-    def _make_left_padded_mask(B: int, N: int, device: torch.device) -> torch.Tensor:
-        """Маска True для позиций 1..N-1 (паддинг слева: позиция 0 не определена)."""
-        mask = torch.ones(B, N, dtype=torch.bool, device=device)
-        mask[:, 0] = False
-        return mask
+    def _pair_masks(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Маски величин, определённых на СОСЕДНЕЙ паре остатков.
+
+        Возвращает (with_prev, with_next):
+          with_prev[i] — валидны и i, и i-1 (φ, ω: паддинг слева);
+          with_next[i] — валидны и i, и i+1 (ψ, ca_dist: паддинг справа).
+
+        Считается по реальной маске сэмпла, а не по общей длине тензора:
+        иначе последний валидный остаток короткой структуры в батче берёт
+        координаты паддинга и получает мусорный торсион, то есть признаки
+        начинают зависеть от того, с кем структура попала в батч.
+        """
+        pair = mask[:, 1:] & mask[:, :-1]
+        with_prev = F.pad(pair, (1, 0), value=False)
+        with_next = F.pad(pair, (0, 1), value=False)
+        return with_prev, with_next
 
     def forward(
         self, coords: torch.Tensor, mask: Optional[torch.Tensor] = None
@@ -72,18 +75,21 @@ class BackboneGeometryExtractor(nn.Module):
         psi_raw = self._dihedral(N_at[:, :-1], CA[:, :-1], C_at[:, :-1], N_at[:, 1:])
         omega_raw = self._dihedral(CA[:, :-1], C_at[:, :-1], N_at[:, 1:], CA[:, 1:])
 
-        # phi: определён для остатков 1..N-1 → паддинг слева
+        # Маски по реальной длине сэмпла: определённость торсиона задаёт
+        # валидность соседнего остатка, а не позиция в паддированном тензоре.
+        with_prev, with_next = self._pair_masks(mask)
+
+        # phi: определён для остатков 1..L-1 → паддинг слева
         phi = F.pad(phi_raw, (1, 0), value=0.0)  # [B, N]
-        phi_mask = self._make_left_padded_mask(B, N, device)
+        phi_mask = with_prev
 
-        # psi: определён для остатков 0..N-2 → паддинг справа
+        # psi: определён для остатков 0..L-2 → паддинг справа
         psi = F.pad(psi_raw, (0, 1), value=0.0)  # [B, N]
-        psi_mask = torch.ones(B, N, dtype=torch.bool, device=device)
-        psi_mask[:, -1] = False
+        psi_mask = with_next
 
-        # omega: определён для остатков 1..N-1 (связь i-1 → i) → паддинг слева
+        # omega: определён для остатков 1..L-1 (связь i-1 → i) → паддинг слева
         omega = F.pad(omega_raw, (1, 0), value=0.0)  # [B, N]
-        omega_mask = self._make_left_padded_mask(B, N, device)
+        omega_mask = with_prev
 
         # --- Аутлайеры Рамачандрана ---
         # FIX: прежняя логика помечала α-спираль как аутлайер (она является допустимой областью).
@@ -151,7 +157,8 @@ class BackboneGeometryExtractor(nn.Module):
 
         # --- Расстояния Cα–Cα ---
         ca_dist_raw = torch.linalg.norm(CA[:, 1:] - CA[:, :-1], dim=-1)
-        ca_dist, ca_mask = self._pad_right_and_mask(ca_dist_raw, N)
+        ca_dist = self._pad_right(ca_dist_raw, N)
+        ca_mask = with_next
 
         return {
             # Виртуальный Cβ отдаётся наружу: на нём строятся ориентационные

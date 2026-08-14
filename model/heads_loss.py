@@ -78,7 +78,7 @@ class PerResidueHead(nn.Module):
     пулингу, поэтому выдаёт вектор длины L вместо одного скаляра на структуру.
 
     Таргет — CA-lDDT остова против ESMFold-рефолда его дизайненной
-    последовательности (build_lddt_labels.py): «воспроизводится ли локальное
+    последовательности (training/build_lddt_labels.py): «воспроизводится ли локальное
     окружение остатка i, когда последовательность реально сворачивают».
     Выход в логитах; сигмоида применяется в лоссе/инференсе.
     """
@@ -149,7 +149,7 @@ class DynamicMultiTaskLoss(nn.Module):
 
         # Веса классов для компенсации дисбаланса failure_mode.
         # Вычисляются по train-сплиту: weights = 1/counts, затем нормализуются
-        # на сумму (см. load_failure_class_weights в train_model.py).
+        # на сумму (см. load_failure_class_weights в training/hybrid.py).
         if failure_class_weights is not None:
             self.register_buffer("failure_class_weights", failure_class_weights)
         else:
@@ -237,29 +237,21 @@ class ProteinScoreModel(nn.Module):
 # Стадия 5: MC-Dropout инференс
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def predict_with_uncertainty(
+def mc_fold_logits(
         model: ProteinScoreModel,
         coords: torch.Tensor,
         mask: torch.Tensor,
         mc_runs: int = 16,
-) -> dict:
-    """
-    Оценка неопределённости через MC-Dropout.
+) -> torch.Tensor:
+    """mc_runs проходов головы fold с включённым dropout. [mc_runs, B]
 
     Ключевое разделение:
       • compute_features — физика, 1 раз (без дропаута)
       • encode_features  — граф + трансформер, mc_runs раз (с дропаутом)
 
-    Параметры
-    ----------
-    model   : обученная ProteinScoreModel
-    coords  : [B, N, 3, 3]  — backbone-координаты [N, Cα, C]
-    mask    : [B, N]  bool — True = валидный остаток
-    mc_runs : число форвард-пассов для оценки дисперсии (8–32 обычно достаточно)
-
-    Возвращает dict:
-      p_foldable  : [B]  — усреднённая вероятность успешного фолдинга
-      uncertainty : [B]  — дисперсия предсказаний (мера неопределённости)
+    Физика — самая дорогая часть прогона и от дропаута не зависит, поэтому
+    считать её на каждом проходе значит умножить стоимость оценки
+    неопределённости на mc_runs без всякой пользы.
     """
     model.eval()
 
@@ -279,23 +271,42 @@ def predict_with_uncertainty(
     model.encoder.apply(_enable_dropout)
     model.heads.apply(_enable_dropout)
 
-    probs: list[torch.Tensor] = []
-
+    logits: list[torch.Tensor] = []
     try:
         for _ in range(mc_runs):
             protein_repr, _, _ = model.encode_features(features)
-            preds = model.predict_from_repr(protein_repr)
-            probs.append(torch.sigmoid(preds["fold_logit"]))  # [B]
-
+            logits.append(model.predict_from_repr(protein_repr)["fold_logit"])  # [B]
     finally:
         for m, state in saved_states.items():
             m.training = state
 
-    stacked = torch.stack(probs, dim=0)  # [mc_runs, B]
-    mean_prob = stacked.mean(dim=0)  # [B]
-    var_prob = stacked.var(dim=0)  # [B]
+    return torch.stack(logits, dim=0)  # [mc_runs, B]
+
+
+@torch.no_grad()
+def predict_with_uncertainty(
+        model: ProteinScoreModel,
+        coords: torch.Tensor,
+        mask: torch.Tensor,
+        mc_runs: int = 16,
+) -> dict:
+    """
+    Оценка неопределённости через MC-Dropout.
+
+    Параметры
+    ----------
+    model   : обученная ProteinScoreModel
+    coords  : [B, N, 3, 3]  — backbone-координаты [N, Cα, C]
+    mask    : [B, N]  bool — True = валидный остаток
+    mc_runs : число форвард-пассов для оценки дисперсии (8–32 обычно достаточно)
+
+    Возвращает dict:
+      p_foldable  : [B]  — усреднённая вероятность успешного фолдинга
+      uncertainty : [B]  — дисперсия предсказаний (мера неопределённости)
+    """
+    probs = torch.sigmoid(mc_fold_logits(model, coords, mask, mc_runs))  # [mc_runs, B]
 
     return {
-        "p_foldable": mean_prob,
-        "uncertainty": var_prob,
+        "p_foldable": probs.mean(dim=0),
+        "uncertainty": probs.var(dim=0),
     }

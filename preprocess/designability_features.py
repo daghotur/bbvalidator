@@ -36,6 +36,19 @@ class DesignabilityProxies(nn.Module):
     def unfreeze_pca(self) -> None:
         self.pca_proj.weight.requires_grad_(True)
 
+    @staticmethod
+    def _replicate_padding(coords: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Заменяет паддинг копией последнего валидного остатка.
+
+        Скользящее окно фрагмента и stride-4 разность у последних валидных
+        остатков заглядывают за конец структуры. В одиночном прогоне там стоит
+        replicate-паддинг самой структуры, в батче — нули соседа по батчу,
+        из-за чего признаки последних остатков зависели от состава батча.
+        """
+        last_idx = mask.sum(dim=1).clamp(min=1) - 1  # [B]
+        last = coords[torch.arange(coords.shape[0], device=coords.device), last_idx]
+        return torch.where(mask.unsqueeze(-1), coords, last.unsqueeze(1))
+
     def _get_local_pairwise_distances(self, coords: torch.Tensor) -> torch.Tensor:
         B, N, _ = coords.shape
         K = self.fragment_size
@@ -101,16 +114,20 @@ class DesignabilityProxies(nn.Module):
         expected_radius = 2.2 * (N_eff**0.333) + 1e-5
         relative_burial = dist_to_centroid / expected_radius
 
-        # 3. PDB-Fragment Similarity
+        # 3. PDB-Fragment Similarity (по структуре без чужого паддинга)
+        ca_filled = self._replicate_padding(ca_coords, mask)
         fragment_features = self._get_local_pairwise_distances(
-            ca_coords
+            ca_filled
         )  # [B, N, frag_pairs]
         pca_projection = self.pca_proj(fragment_features - self.frag_mean)
 
-        # 4. Loop Geometry Flags (stride-4 displacement — прокси кривизны)
+        # 4. Loop Geometry Flags (stride-4 displacement — прокси кривизны).
+        # Значение определено там, где валидны оба конца окна i-2 и i+2.
         delta = ca_coords[:, 4:] - ca_coords[:, :-4]  # [B, N-4, 3]
         local_bending = torch.linalg.vector_norm(delta, dim=-1)
         local_bending = F.pad(local_bending, (2, 2), value=0.0)  # [B, N]
+        bend_valid = F.pad(mask[:, 4:] & mask[:, :-4], (2, 2), value=False)
+        local_bending = local_bending * bend_valid.float()
 
         m = mask.float()
         return {

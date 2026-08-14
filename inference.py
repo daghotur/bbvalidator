@@ -66,12 +66,19 @@ def parse_pdb_to_backbone(pdb_path: str) -> np.ndarray:
     return coords
 
 
-def remap_legacy_foldability_keys(state_dict: dict) -> dict:
-    """Чекпоинты до переименования foldability → designability: правим ключи."""
-    return {
-        k.replace("foldability", "designability"): v
-        for k, v in state_dict.items()
-    }
+def soft_checkpoint_marker(checkpoint: dict) -> str | None:
+    """Метка soft-дообучения в чекпоинте, если она есть.
+
+    training/soft.py кладёт target="log1p(scRMSD)", training/soft_multitask.py —
+    recipe с native-якорем. По ним отличается семантика головы fold.
+    """
+    if not isinstance(checkpoint, dict):
+        return None
+    for key in ("target", "recipe"):
+        value = checkpoint.get(key)
+        if isinstance(value, str):
+            return f"{key}={value}"
+    return None
 
 
 def expand_linear_inputs(
@@ -79,14 +86,17 @@ def expand_linear_inputs(
 ) -> dict:
     """Дополняет входы линейных слоёв, у которых выросла размерность входа.
 
-    Сейчас такое расширение одно: `encoder.pair_embed.0` — 20 → 29, к признакам
-    рёбер добавлены ориентационные (набор trRosetta, docs/05 раздел 5.8). Новые
-    входы дописываются В КОНЕЦ конкатенации, поэтому старые веса остаются на
-    своих местах и чекпоинты остаются загружаемыми.
+    Повод — расширение парного канала 20 → 29: к признакам рёбер добавлены
+    ориентационные (набор trRosetta, docs/05 раздел 5.8). Новые входы
+    дописываются В КОНЕЦ конкатенации, поэтому старые веса остаются на своих
+    местах и чекпоинты остаются загружаемыми.
 
-    Функция оставлена обобщённой намеренно: расширение входа — повторяющийся
-    сценарий при правках признаков, и добавление слоя сюда дешевле, чем
-    написание отдельного обработчика.
+    Слои не перечисляются поимённо: у гибрида это `encoder.pair_embed.0`, у
+    GPS-базлайна — `encoder.gps_layers.*.conv.lin_edge`, и список пришлось бы
+    поддерживать вручную (из-за чего базлайны и перестали загружаться).
+    Признак случая объективен: двумерный вес, число выходов совпало, а входов
+    в чекпоинте меньше. Всё остальное несовпадение форм остаётся ошибкой
+    загрузки — её поднимет сам load_state_dict.
 
     pair_init="zero"   — новые входы зануляются: модель сразу после загрузки
                          считает ровно то же, что и раньше. Режим для инференса
@@ -98,21 +108,15 @@ def expand_linear_inputs(
                          против 5.97 у остальных, зеркальный тест не сдвинулся),
                          потому что давления их включать нет.
     """
-    targets = {
-        "encoder.pair_embed.0.weight": model.encoder.pair_embed[0].weight.shape,
-    }
     state_dict = dict(state_dict)
-    for key, want in targets.items():
-        if key not in state_dict:
+    for key, param in model.state_dict().items():
+        if key not in state_dict or not key.endswith(".weight"):
             continue
-        have = state_dict[key].shape
-        if have == want:
+        have, want = state_dict[key].shape, param.shape
+        if len(have) != 2 or len(want) != 2:
             continue
-        if have[0] != want[0] or have[1] > want[1]:
-            raise RuntimeError(
-                f"Несовместимая форма {key}: в чекпоинте {tuple(have)}, "
-                f"ожидается {tuple(want)}"
-            )
+        if have[0] != want[0] or have[1] >= want[1]:
+            continue
         if pair_init == "zero":
             padded = torch.zeros(want, dtype=state_dict[key].dtype)
             note = "нулями (поведение не меняется)"
@@ -161,16 +165,14 @@ def build_model(
     # недоверенного .pth (pickle RCE). Чекпоинт содержит только тензоры и скаляры.
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
-    # Обработка ключа model_state_dict (как мы сохраняли в train_model.py)
+    # Обработка ключа model_state_dict (как мы сохраняли в training/hybrid.py)
     state_dict = checkpoint.get('model_state_dict', checkpoint)
-    state_dict = remap_legacy_foldability_keys(state_dict)
     state_dict = expand_linear_inputs(state_dict, model, pair_init)
     try:
         if per_residue and not any(k.startswith("per_residue_head.") for k in state_dict):
             # Дообучение поверх чекпоинта без по-остаточной головы: она новая,
             # инициализируется с нуля. Всё остальное обязано совпасть.
             missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            unexpected = [k for k in unexpected]
             missing = [k for k in missing if not k.startswith("per_residue_head.")]
             if missing or unexpected:
                 raise RuntimeError(f"несовпадение ключей: {missing[:5]} / {unexpected[:5]}")
@@ -181,7 +183,7 @@ def build_model(
         raise RuntimeError(
             "Чекпоинт несовместим с текущей архитектурой. Чекпоинты до "
             "пересборки 2026-08 не подойдут: убрана hbond-голова, добавлен "
-            "PCA-буфер frag_mean. Переобучите модель (train_model.py)."
+            "PCA-буфер frag_mean. Переобучите модель (training/hybrid.py)."
         ) from e
 
     # PCA фронтенда: чекпоинт уже содержит фит-веса, но файл применяем
@@ -257,6 +259,20 @@ def main():
     if not os.path.exists(args.ckpt):
         print(f"Ошибка: Файл весов {args.ckpt} не найден.")
         return
+
+    # Колонки ниже (P(Fold), Uncert., Pred RMSD) читают fold_logit как логит
+    # вероятности. У soft-чекпоинтов это регрессия log1p(scRMSD): sigmoid от
+    # неё — не вероятность, и «✅ 0.99» означал бы ровно обратное.
+    marker = soft_checkpoint_marker(
+        torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    )
+    if marker:
+        raise SystemExit(
+            f"{args.ckpt} — soft-чекпоинт ({marker}): голова fold предсказывает "
+            "log1p(scRMSD), а не вероятность фолдинга. Для таких весов есть "
+            "filter_designability.py — он печатает предсказанный scRMSD в Å."
+        )
+
     model = build_model(args.ckpt, device)
 
     # Поиск файлов
