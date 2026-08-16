@@ -64,3 +64,7 @@ course_work*.tex
 
 # Логи полного прогона
 logs/
+
+# Прогоны МД: траектории и подготовка систем (воспроизводимы через md/prepare.sh + md/produce.sh)
+md/runs/
+md/bench/
